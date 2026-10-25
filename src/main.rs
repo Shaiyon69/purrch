@@ -57,6 +57,12 @@ struct State {
     pill_key: String,
     /// Hover-intent timer is running.
     open_pending: bool,
+    /// A full-screen or borderless app owns the screen, so the notch hides above the edge.
+    fullscreen: bool,
+    /// The cursor was pushed into the top edge to bring the notch back over that app.
+    peeked: bool,
+    /// When the peeked notch was left alone, to slide it away after a short wait.
+    away_since: Option<Instant>,
 }
 
 thread_local! {
@@ -76,8 +82,12 @@ impl State {
         self.prev_bounds = Some(bounds);
         self.pill_key = self.app.pill_key();
         self.last_frame = Instant::now();
+        // Slides by the notch's own height so it starts moving at once, and fades on the way.
+        let peek = self.app.peek();
+        let pos = POINT { x: self.origin.x, y: self.origin.y - ((bounds.h + 4.0) * self.scale * (1.0 - peek)) as i32 };
+        let alpha = (255.0 * peek * peek * (3.0 - 2.0 * peek)) as u8;
         let app = &mut self.app;
-        let _ = self.renderer.frame(self.hwnd, dirty, |p| app.draw(p));
+        let _ = self.renderer.frame(self.hwnd, dirty, pos, alpha, |p| app.draw(p));
     }
 
     /// Repaints unless the notch is collapsed and the pill would look the same.
@@ -103,6 +113,48 @@ impl State {
             }
         }
         self.render();
+        if !self.app.shown && self.app.peek() == 0.0 {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+        }
+    }
+
+    /// Over a full-screen app the notch waits above the screen; pushing the cursor into the
+    /// top-middle edge brings it back over that app until the cursor leaves it alone.
+    fn auto_hide(&mut self) {
+        if !self.fullscreen {
+            self.peeked = false;
+        } else {
+            let mut pt = POINT::default();
+            let _ = unsafe { GetCursorPos(&mut pt) };
+            let mid = self.origin.x + (app::CANVAS_W * self.scale) as i32 / 2;
+            if pt.y <= self.origin.y && ((pt.x - mid).abs() as f32) < 120.0 * self.scale {
+                self.peeked = true;
+                self.away_since = None;
+            } else if self.peeked && !self.app.open() && self.app.closed() {
+                let since = *self.away_since.get_or_insert_with(Instant::now);
+                if since.elapsed() > Duration::from_millis(600) {
+                    self.peeked = false;
+                }
+            } else {
+                self.away_since = None;
+            }
+        }
+        let shown = !self.fullscreen || self.peeked;
+        if shown == self.app.shown {
+            return;
+        }
+        self.app.shown = shown;
+        self.away_since = None;
+        if shown {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                // The full-screen window is topmost too; climb back above it.
+                let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+        self.start_anim();
     }
 
     fn mouse(&self, lp: LPARAM) -> (f32, f32) {
@@ -226,12 +278,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         WM_TIMER => {
             with_state(|s| match wp.0 {
                 TIMER_TICK => {
-                    let hide = status::fullscreen_app();
-                    if hide == unsafe { IsWindowVisible(hwnd) }.as_bool() {
-                        unsafe {
-                            let _ = ShowWindow(hwnd, if hide { SW_HIDE } else { SW_SHOWNOACTIVATE });
-                        }
-                    }
+                    s.fullscreen = status::fullscreen_app();
                     s.app.tick(State::idle_ms());
                     s.start_anim();
                     s.refresh();
@@ -262,6 +309,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     s.start_anim();
                 }
                 TIMER_EYES => {
+                    s.auto_hide();
                     let caps = s.app.poll_caps();
                     if caps {
                         s.start_anim();
@@ -510,6 +558,9 @@ fn main() -> Result<()> {
             prev_bounds: None,
             pill_key: String::new(),
             open_pending: false,
+            fullscreen: false,
+            peeked: false,
+            away_since: None,
         };
         STATE.with(|s| *s.borrow_mut() = Some(state));
         with_state(|s| s.render());

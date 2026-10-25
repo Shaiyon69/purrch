@@ -176,7 +176,8 @@ impl Renderer {
 
     /// Draw a frame with `paint` and push it to the window. With `dirty` (DIPs) only that
     /// area is cleared, redrawn and uploaded; the rest keeps the previous frame.
-    pub fn frame(&self, hwnd: HWND, dirty: Option<Rect>, paint: impl FnOnce(&Painter)) -> Result<()> {
+    /// `pos` and `alpha` move and fade the window in the same update, so a slide never tears.
+    pub fn frame(&self, hwnd: HWND, dirty: Option<Rect>, pos: POINT, alpha: u8, paint: impl FnOnce(&Painter)) -> Result<()> {
         unsafe {
             let (mut dpi, mut _dpi_y) = (96.0, 96.0);
             self.target.GetDpi(&mut dpi, &mut _dpi_y);
@@ -201,7 +202,7 @@ impl Renderer {
             self.target.EndDraw(None, None)?;
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
-                SourceConstantAlpha: 255,
+                SourceConstantAlpha: alpha,
                 AlphaFormat: AC_SRC_ALPHA as u8,
                 ..Default::default()
             };
@@ -209,7 +210,7 @@ impl Renderer {
             let info = UPDATELAYEREDWINDOWINFO {
                 cbSize: size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
                 hdcDst: HDC::default(),
-                pptDst: std::ptr::null(),
+                pptDst: &pos,
                 psize: &self.size,
                 hdcSrc: self.dc,
                 pptSrc: &origin,

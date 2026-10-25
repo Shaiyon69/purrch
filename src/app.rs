@@ -16,15 +16,19 @@ use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::core::w;
 
-pub const CANVAS_W: f32 = 600.0;
+pub const CANVAS_W: f32 = 800.0;
 pub const CANVAS_H: f32 = 170.0;
 const OPEN_W: f32 = 420.0;
 /// The panel widens for lyrics: player on the left, scrolling lines on the right.
 const LYRICS_W: f32 = 520.0;
 const OPEN_H: f32 = 140.0;
 const PILL_H: f32 = 30.0;
-/// The collapsed pill while it carries a lyric line.
+/// The collapsed pill while it carries a lyric line: at least this wide, growing to fit
+/// the song's longest line up to the max.
 const LYRIC_PILL_W: f32 = 420.0;
+const LYRIC_PILL_MAX: f32 = CANVAS_W - 2.0 * SHOULDER - 20.0;
+/// Room the cat and the clock take beside the lyric line.
+const LYRIC_PILL_PAD: f32 = 112.0;
 /// One lyric line rolling over to the next in the pill.
 const LINE_SECS: f32 = 0.42;
 /// Widest concave fillet where the notch meets the top edge.
@@ -94,6 +98,8 @@ struct Toast {
     detail: String,
     color: Color,
     until: Instant,
+    /// A new song: shown centred as "title | artist", without the status dot.
+    song: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -274,6 +280,13 @@ pub struct App {
     pill_size: (f32, f32),
     /// Lyric line in the pill and the one it replaced, rolling over since the instant.
     pill_line: (String, String, Instant),
+    /// Lyric pill width fitted to the current song's longest line, keyed by song.
+    pill_fit: (String, f32),
+    /// Whether the notch should be on screen; false while hidden over a full-screen app.
+    pub shown: bool,
+    /// 0 = slid up above the screen edge, 1 = in place.
+    peek: f32,
+    peek_vel: f32,
 }
 
 /// Moves `v` toward `target` at `rate` per second (exponential), snapping when close.
@@ -341,6 +354,10 @@ impl App {
             shelf_added: Vec::new(),
             pill_size: (0.0, PILL_H),
             pill_line: (String::new(), String::new(), Instant::now()),
+            pill_fit: (String::new(), LYRIC_PILL_W),
+            shown: true,
+            peek: 1.0,
+            peek_vel: 0.0,
         };
         app.pill_size.0 = app.pill_width();
         app.water.new_day(clock().day);
@@ -355,7 +372,7 @@ impl App {
         let _ = store::save(water::FILE, &self.water.to_text());
     }
 
-    fn open(&self) -> bool {
+    pub fn open(&self) -> bool {
         self.hover || self.alert.is_some() || self.editing.is_some() || self.drag_hover
     }
 
@@ -383,6 +400,9 @@ impl App {
         if track.playing && key != self.now_playing && !track.title.is_empty() {
             self.now_playing = key;
             self.toast(track.title, track.artist, SHELF);
+            if let Some(t) = &mut self.toast {
+                t.song = true;
+            }
         }
     }
 
@@ -469,7 +489,7 @@ impl App {
     }
 
     fn toast(&mut self, title: String, detail: String, color: Color) {
-        self.toast = Some(Toast { title, detail, color, until: Instant::now() + Duration::from_secs(TOAST_SECS) });
+        self.toast = Some(Toast { title, detail, color, until: Instant::now() + Duration::from_secs(TOAST_SECS), song: false });
     }
 
     /// Polled often; returns true when the Caps Lock state changed.
@@ -594,6 +614,22 @@ impl App {
         let rate = if pw < self.pill_size.0 { 16.0 } else { 11.0 };
         let glide = |v: f32, to: f32| if (to - v).abs() < 0.3 { to } else { approach(v, to, dt, rate) };
         self.pill_size = (glide(self.pill_size.0, pw), glide(self.pill_size.1, ph));
+        // Drops in softly, leaves quicker; clamped so it never dips below its resting place.
+        let shown = self.shown as u8 as f32;
+        if self.reduced_motion {
+            (self.peek, self.peek_vel) = (shown, 0.0);
+        }
+        let omega: f32 = if self.shown { 20.0 } else { 30.0 };
+        let mut left = dt;
+        while left > 0.0 {
+            let h = left.min(0.002);
+            self.peek_vel += (omega * omega * (shown - self.peek) - 2.0 * omega * self.peek_vel) * h;
+            self.peek = (self.peek + self.peek_vel * h).clamp(0.0, 1.0);
+            left -= h;
+        }
+        if (shown - self.peek).abs() < 0.003 && self.peek_vel.abs() < 0.05 {
+            (self.peek, self.peek_vel) = (shown, 0.0);
+        }
         let water = self.water_target();
         self.water_shown += (water - self.water_shown) * (1.0 - (-dt * 10.0).exp());
         if (water - self.water_shown).abs() < 0.002 {
@@ -623,6 +659,14 @@ impl App {
             || !self.shelf_added.is_empty()
             || self.pill_size != (self.pill_width(), self.pill_height())
             || self.pill_line.2.elapsed().as_secs_f32() < LINE_SECS
+            // The notes in a blank lyric pill keep waving.
+            || (self.shown && self.pill_lyric().is_some_and(|l| l.is_empty()))
+            || self.peek != self.shown as u8 as f32
+            || self.peek_vel != 0.0
+    }
+
+    pub fn peek(&self) -> f32 {
+        self.peek
     }
 
     /// Polled often; returns true when the pill's lyric line changed and should roll over.
@@ -697,7 +741,7 @@ impl App {
             (Some(_), _) => 320.0,
             (None, true) => 120.0,
             // Fixed width while lyrics run, so the notch doesn't jump with every line.
-            (None, false) if self.pill_lyric().is_some() => LYRIC_PILL_W,
+            (None, false) if self.pill_lyric().is_some() => self.pill_fit.1,
             (None, false) => 150.0,
         }
     }
@@ -708,7 +752,7 @@ impl App {
     }
 
     /// Line being sung, shown between the cat and the clock while collapsed with lyrics on.
-    /// Empty between verses; None when paused or before the first line.
+    /// Empty when there is no line to show (the notes wave then); None when paused.
     fn pill_lyric(&self) -> Option<String> {
         if !self.show_lyrics || self.compact || self.toast.is_some() {
             return None;
@@ -716,8 +760,9 @@ impl App {
         // Read in place: snapshot() would clone every lyric line, and this runs several times a frame.
         let snap = self.media.as_ref()?.shared.lock().ok()?;
         let track = snap.track.as_ref().filter(|t| t.playing)?;
-        let LyricState::Found(lines) = &snap.lyrics else { return None };
-        Some(lines[lyrics::current(lines, track.position())?].1.clone())
+        // No line to sing (lyrics missing, or before the first line): the notes wave instead.
+        let LyricState::Found(lines) = &snap.lyrics else { return Some(String::new()) };
+        Some(lyrics::current(lines, track.position()).map_or(String::new(), |i| lines[i].1.clone()))
     }
 
     pub fn tick(&mut self, idle_ms: u32) {
@@ -1049,18 +1094,37 @@ impl App {
     }
 
     fn draw_pill(&mut self, p: &Painter, x: f32, w: f32) {
+        let (label, color) = if self.pomo.running() {
+            (mmss(self.pomo.remaining(Instant::now())), FOCUS)
+        } else {
+            (hhmm(clock().now), TEXT)
+        };
+        if let Some(t) = self.toast.as_ref().filter(|t| t.song) {
+            // Cat, "title | artist" centred between, clock. Short of room, the title keeps the most.
+            let side = 46f32.max(18.0 + p.measure(&label, Font::Body) + 10.0);
+            let room = w - 2.0 * side;
+            let sep = " | ";
+            let (tw, sw, aw) = (p.measure(&t.title, Font::Body), p.measure(sep, Font::Body), p.measure(&t.detail, Font::Body));
+            let aw = if t.detail.is_empty() { 0.0 } else { aw.min((room - sw - tw).max((room - sw) * 0.4)).max(0.0) };
+            let sw = if aw > 0.0 { sw } else { 0.0 };
+            let tw = tw.min(room - sw - aw);
+            let sx = (CANVAS_W - tw - sw - aw) / 2.0;
+            p.text(&t.title, Rect::new(sx, 0.0, tw + 1.0, PILL_H), Font::Body, TEXT, Align::Left);
+            if aw > 0.0 {
+                p.text(sep, Rect::new(sx + tw, 0.0, sw + 1.0, PILL_H), Font::Body, MUTED, Align::Left);
+                p.text(&t.detail, Rect::new(sx + tw + sw, 0.0, aw + 1.0, PILL_H), Font::Body, MUTED, Align::Left);
+            }
+            p.text(&label, Rect::new(x + 16.0, 0.0, w - 34.0, PILL_H), Font::Body, color, Align::Right);
+            return;
+        }
         if let Some(t) = &self.toast {
             p.ellipse(x + 46.0, PILL_H / 2.0, 4.0, 4.0, t.color);
             p.text(&t.title, Rect::new(x + 56.0, 0.0, 130.0, PILL_H), Font::Body, TEXT, Align::Left);
             p.text(&t.detail, Rect::new(x + 190.0, 0.0, w - 206.0, PILL_H), Font::Small, MUTED, Align::Right);
             return;
         }
-        let (label, color) = if self.pomo.running() {
-            (mmss(self.pomo.remaining(Instant::now())), FOCUS)
-        } else {
-            (hhmm(clock().now), TEXT)
-        };
         let h = self.pill_size.1;
+        self.fit_pill_lyric(p);
         self.draw_pill_lyric(p, h);
         let align = if self.compact { Align::Center } else { Align::Right };
         p.text(&label, Rect::new(x + 16.0, 0.0, w - 34.0, h), Font::Body, color, align);
@@ -1068,15 +1132,36 @@ impl App {
 
     /// The sung line rolls over like a karaoke screen: the old one lifts away quickly, the new one rises in.
     /// Laid out at the lyric pill's final size and centred on the notch, so the growing shape reveals it.
+    /// Sizes the lyric pill once per song so every line fits without the pill jumping line to line.
+    fn fit_pill_lyric(&mut self, p: &Painter) {
+        let Some(media) = &self.media else { return };
+        let Ok(snap) = media.shared.lock() else { return };
+        let (Some(track), LyricState::Found(lines)) = (&snap.track, &snap.lyrics) else { return };
+        let key = format!("{}\u{1}{}\u{1}{}", track.title, track.artist, lines.len());
+        if self.pill_fit.0 != key {
+            let widest = lines.iter().map(|(_, l)| p.measure(l, Font::Body)).fold(0.0, f32::max);
+            self.pill_fit = (key, (widest + LYRIC_PILL_PAD + 8.0).clamp(LYRIC_PILL_W, LYRIC_PILL_MAX));
+        }
+    }
+
     fn draw_pill_lyric(&self, p: &Painter, h: f32) {
         let (now, before, at) = &self.pill_line;
         let t = (at.elapsed().as_secs_f32() / LINE_SECS).min(1.0);
         let ease = |t: f32| if t >= 1.0 { 1.0 } else { 1.0 - 2f32.powf(-10.0 * t) };
         let rise = if self.reduced_motion { 0.0 } else { 7.0 };
-        let w = LYRIC_PILL_W - 112.0;
+        let w = self.pill_width() - LYRIC_PILL_PAD;
         let r = Rect::new((CANVAS_W - w) / 2.0, 0.0, w, h);
         let line = |s: &str, a: f32, dy: f32| {
-            if !s.is_empty() && a > 0.0 {
+            if a <= 0.0 {
+            } else if s.is_empty() {
+                // With no line to show, a wave of notes fills the space between the cat and the clock.
+                const SCALE: f32 = 0.75;
+                let (cx, cy) = (CANVAS_W / 2.0, h / 2.0);
+                let count = ((w - 16.0) / (NOTE_GAP * SCALE)) as usize;
+                p.push_clip(r, h / 2.0, a);
+                p.scaled(SCALE, cx, cy, dy, || draw_notes(p, cx, cy + 4.0, count));
+                p.pop_clip();
+            } else {
                 p.scaled(1.0, 0.0, 0.0, dy, || p.text(s, r, Font::Body, Color { a, ..TEXT }, Align::Center));
             }
         };
@@ -1361,7 +1446,7 @@ impl App {
             LyricState::Found(lines) => lines,
             state => {
                 let msg = if *state == LyricState::Loading { "Loading lyrics…" } else { "Lyrics not available" };
-                draw_notes(p, bx + lw / 2.0, top + 50.0);
+                draw_notes(p, bx + lw / 2.0, top + 50.0, 5);
                 p.text(msg, Rect::new(bx, top + 80.0, lw, 20.0), Font::Small, MUTED, Align::Center);
                 return;
             }
@@ -1720,12 +1805,15 @@ fn drop_icon(p: &Painter, cx: f32, cy: f32, s: f32, c: Color) {
 }
 
 /// A row of music notes bobbing in a wave, shown while a song has no lyrics.
-fn draw_notes(p: &Painter, cx: f32, cy: f32) {
+const NOTE_GAP: f32 = 30.0;
+
+/// A wave of `count` notes centred on (`cx`, `cy`).
+fn draw_notes(p: &Painter, cx: f32, cy: f32, count: usize) {
     // Wall-clock phase, so the wave keeps moving across redraws without stored state.
     let t = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() % 100_000) as f32 / 1000.0;
-    for i in 0..5 {
+    for i in 0..count {
         let phase = t * 2.4 - i as f32 * 0.8;
-        let (x, y) = (cx + (i as f32 - 2.0) * 30.0, cy + 5.0 * phase.sin());
+        let (x, y) = (cx + (i as f32 - (count as f32 - 1.0) / 2.0) * NOTE_GAP, cy + 5.0 * phase.sin());
         let c = rgba(1.0, 1.0, 1.0, 0.35 + 0.3 * (0.5 + 0.5 * phase.sin()));
         // Head sits left of the stem, stem rises 14 DIPs; even notes are a beamed pair.
         let note = |hx: f32, hy: f32| {
