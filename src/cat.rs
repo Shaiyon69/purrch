@@ -1,6 +1,7 @@
 //! The notch cat: glowing eyes peeking out of the black notch, with ears, nose and whiskers.
 //! Its rhythm follows Nusa's mascot: drowsy after 15 s without input, asleep 5.5 s later,
 //! and a startled, happy wake-up with a paw wave when you come back.
+//! While awake it fidgets every few seconds (glance, yawn, wink, ear flick, purr); asleep, its ear twitches.
 
 use crate::ui::{Align, Color, Font, Painter, Rect, rgba};
 use std::f32::consts::PI;
@@ -27,6 +28,48 @@ const WAKING_SECS: f32 = 5.2;
 const STARTLE_SECS: f32 = 0.3;
 const SNORE_PERIOD: f32 = 4.0;
 const SNORE_SECS: f32 = 1.4;
+const HEART: Color = rgba(1.0, 0.45, 0.58, 1.0);
+
+/// Short animations: the first five the cat plays on its own, the rest react to clicks.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Trick {
+    Glance,
+    Yawn,
+    Wink,
+    EarFlick,
+    Purr,
+    /// Any click: eyes dart to it, pupils wide.
+    Peek,
+    /// Something done (sip, task, focus start): a look, then a happy hop and a wave.
+    Cheer,
+    /// Something removed: a jump with wide eyes.
+    Startle,
+    /// Track skipped: head bob, eyes swaying to the beat.
+    Groove,
+}
+
+impl Trick {
+    const AWAKE: [Trick; 5] = [Trick::Glance, Trick::Yawn, Trick::Wink, Trick::EarFlick, Trick::Purr];
+
+    fn secs(self) -> f32 {
+        match self {
+            Trick::Glance => 2.6,
+            Trick::Yawn => 2.0,
+            Trick::Wink => 0.7,
+            Trick::EarFlick => 0.8,
+            Trick::Purr => 2.8,
+            Trick::Peek => 0.8,
+            Trick::Cheer => 1.8,
+            Trick::Startle => 1.0,
+            Trick::Groove => 3.0,
+        }
+    }
+}
+
+/// Eye offset for a point (dx, dy) DIPs from the cat: a few DIPs sideways, a little more down than up.
+pub fn gaze(dx: f32, dy: f32) -> (f32, f32) {
+    ((dx / 60.0).clamp(-3.5, 3.5), (dy / 80.0).clamp(-1.0, 2.0))
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Mood {
@@ -44,6 +87,7 @@ struct Pose {
     happy: f32,
     paw: f32,
     dilate: f32,
+    yawn: f32,
 }
 
 pub struct Cat {
@@ -55,6 +99,10 @@ pub struct Cat {
     /// Where the cursor is, as an eye offset in DIPs: x in -3.5..3.5, y in -1..2.
     pub look: (f32, f32),
     pose: Pose,
+    trick: Option<(Trick, Instant)>,
+    next_trick: Instant,
+    /// Where a reaction looks, as an eye offset like `look`.
+    spot: (f32, f32),
 }
 
 impl Cat {
@@ -66,7 +114,10 @@ impl Cat {
             next_blink: now + Duration::from_secs(3),
             rng: 0x2545_f491,
             look: (0.0, 0.0),
-            pose: Pose { open: 1.0, eye: (0.0, 0.0), happy: 0.0, paw: 0.0, dilate: 0.0 },
+            pose: Pose { open: 1.0, eye: (0.0, 0.0), happy: 0.0, paw: 0.0, dilate: 0.0, yawn: 0.0 },
+            trick: None,
+            next_trick: now + Duration::from_secs(8),
+            spot: (0.0, 0.0),
         }
     }
 
@@ -82,6 +133,26 @@ impl Cat {
     fn set(&mut self, mood: Mood, now: Instant) {
         self.mood = mood;
         self.since = now;
+        self.trick = None;
+        self.next_trick = now + Duration::from_secs(8);
+    }
+
+    /// The running trick and how far into it, in seconds.
+    fn trick(&self, now: Instant) -> Option<(Trick, f32)> {
+        self.trick.map(|(k, at)| (k, now.saturating_duration_since(at).as_secs_f32()))
+    }
+
+    /// Plays a reaction looking toward `spot`, cutting off any idle trick. A dozing cat ignores it;
+    /// the same input wakes it through `poke`.
+    pub fn react(&mut self, trick: Trick, spot: (f32, f32), now: Instant) {
+        if self.mood == Mood::Awake {
+            self.trick = Some((trick, now));
+            self.spot = spot;
+        }
+    }
+
+    fn can_trick(&self) -> bool {
+        matches!(self.mood, Mood::Awake | Mood::Asleep)
     }
 
     /// Called once a second: an awake cat dozes off once the user has been away long enough.
@@ -113,9 +184,24 @@ impl Cat {
 
     fn target(&self, now: Instant) -> Pose {
         let t = self.age(now);
-        let rest = Pose { open: 1.0, eye: self.look, happy: 0.0, paw: 0.0, dilate: 0.0 };
+        let rest = Pose { open: 1.0, eye: self.look, happy: 0.0, paw: 0.0, dilate: 0.0, yawn: 0.0 };
         match self.mood {
-            Mood::Awake => rest,
+            Mood::Awake => match self.trick(now) {
+                // Looks off one way, then the other, then back at you.
+                Some((Trick::Glance, k)) if k < 2.2 => Pose { eye: (if k < 1.0 { -3.5 } else { 3.5 }, 0.2), ..rest },
+                Some((Trick::Yawn, k)) if k > 0.15 && k < 1.5 => Pose { open: 0.2, yawn: 1.0, eye: (0.0, -0.4), ..rest },
+                // Winks sideways, and peeks up at the twitching ear.
+                Some((Trick::Wink, _)) => Pose { eye: (2.5, -0.3), ..rest },
+                Some((Trick::EarFlick, k)) if k < 0.6 => Pose { eye: (2.8, -1.0), ..rest },
+                // Content eyes rocking slowly side to side.
+                Some((Trick::Purr, k)) if k < 2.4 => Pose { happy: 1.0, eye: (1.5 * (k * 3.0).sin(), 0.0), ..rest },
+                Some((Trick::Peek, k)) if k < 0.6 => Pose { eye: self.spot, open: 1.1, dilate: 1.0, ..rest },
+                Some((Trick::Cheer, k)) if k < 0.3 => Pose { eye: self.spot, dilate: 1.0, ..rest },
+                Some((Trick::Cheer, k)) if k < 1.5 => Pose { happy: 1.0, paw: 1.0, eye: (self.spot.0 * 0.5, 0.0), ..rest },
+                Some((Trick::Startle, k)) if k < 0.6 => Pose { eye: self.spot, open: 1.25, dilate: 1.0, ..rest },
+                Some((Trick::Groove, k)) if k < 2.7 => Pose { eye: (2.5 * (k * PI * 2.4).sin(), 0.3), ..rest },
+                _ => rest,
+            },
             Mood::Waking if t < STARTLE_SECS => Pose { open: 1.15, dilate: 1.0, ..rest },
             Mood::Waking => Pose {
                 eye: (0.0, 0.0),
@@ -136,6 +222,19 @@ impl Cat {
             Mood::Drowsy if t >= DROWSY_SECS => self.set(Mood::Asleep, now),
             Mood::Waking if t >= WAKING_SECS => self.set(Mood::Awake, now),
             _ => {}
+        }
+        if let Some((k, t)) = self.trick(now) {
+            if t >= k.secs() {
+                self.trick = None;
+                self.next_trick = now + Duration::from_secs_f32(6.0 + self.rand() * 9.0);
+            }
+        } else if self.can_trick() && now >= self.next_trick {
+            let k = if self.mood == Mood::Asleep {
+                Trick::EarFlick
+            } else {
+                Trick::AWAKE[(self.rand() * 5.0) as usize % 5]
+            };
+            self.trick = Some((k, now));
         }
         if let Some(at) = self.blink_at {
             if now.saturating_duration_since(at).as_secs_f32() >= self.blink_secs() {
@@ -158,6 +257,7 @@ impl Cat {
         ease(&mut p.happy, to.happy);
         ease(&mut p.paw, to.paw);
         ease(&mut p.dilate, to.dilate);
+        ease(&mut p.yawn, to.yawn);
         self.busy(now)
     }
 
@@ -172,8 +272,11 @@ impl Cat {
             || off(p.eye.1, to.eye.1)
             || off(p.happy, to.happy)
             || off(p.paw, to.paw)
-            || off(p.dilate, to.dilate);
+            || off(p.dilate, to.dilate)
+            || off(p.yawn, to.yawn);
         unsettled
+            || self.trick.is_some()
+            || (self.can_trick() && now >= self.next_trick)
             || self.blink_at.is_some()
             || (self.mood != Mood::Asleep && now >= self.next_blink)
             || matches!(self.mood, Mood::Drowsy | Mood::Waking)
@@ -182,7 +285,25 @@ impl Cat {
 
     /// Draws the cat centred on (cx, cy); `s` scales it (1.0 is about 31 DIP wide).
     pub fn draw(&self, p: &Painter, cx: f32, cy: f32, s: f32, now: Instant) {
-        let Pose { open, eye: (lx, ly), happy, paw, dilate } = self.pose;
+        let Pose { open, eye: (lx, ly), happy, paw, dilate, yawn } = self.pose;
+        let trick = self.trick(now);
+        // Hops and bobs lift the whole head.
+        let hop = match trick {
+            Some((Trick::Cheer, k)) if k > 0.3 && k < 1.5 => ((k - 0.3) * PI * 2.5).sin().abs() * 2.5,
+            Some((Trick::Startle, k)) if k < 0.3 => (k / 0.3 * PI).sin() * 3.0,
+            Some((Trick::Groove, k)) if k < 2.7 => (k * PI * 2.4).sin().abs() * 1.5,
+            _ => 0.0,
+        };
+        let cy = cy - hop * s;
+        // One ear flicks back and springs up; one eye closes for a wink.
+        let flick = match trick {
+            Some((Trick::EarFlick, k)) => (k / Trick::EarFlick.secs() * PI * 2.0).sin().max(0.0) * 3.0 * s,
+            _ => 0.0,
+        };
+        let wink = match trick {
+            Some((Trick::Wink, k)) => 1.0 - 0.95 * (k / Trick::Wink.secs() * PI).sin(),
+            _ => 1.0,
+        };
         let blink = self.blink_at.map_or(1.0, |at| {
             let b = (now.saturating_duration_since(at).as_secs_f32() / self.blink_secs()).min(1.0);
             1.0 - 0.9 * (b * PI).sin()
@@ -193,10 +314,11 @@ impl Cat {
         let lean = lx * 0.3 * s;
         for side in [-1.0f32, 1.0] {
             let x = |d: f32| cx + side * d * s + lean;
-            p.triangle([(x(3.5), cy - 7.0 * s), (x(15.0), cy - 3.5 * s), (x(12.0), cy - 13.0 * s - lift)], EAR);
-            p.triangle([(x(6.5), cy - 7.0 * s), (x(13.0), cy - 5.0 * s), (x(11.5), cy - 11.0 * s - lift)], EAR_IN);
+            let (tx, ty) = if side > 0.0 { (flick, flick) } else { (0.0, 0.0) };
+            p.triangle([(x(3.5), cy - 7.0 * s), (x(15.0), cy - 3.5 * s), (x(12.0) + tx, cy - 13.0 * s - lift + ty)], EAR);
+            p.triangle([(x(6.5), cy - 7.0 * s), (x(13.0), cy - 5.0 * s), (x(11.5) + tx, cy - 11.0 * s - lift + ty)], EAR_IN);
             // A rounded tip instead of a sharp point.
-            p.ellipse(x(12.0), cy - 12.6 * s - lift, 0.9 * s, 0.9 * s, EAR);
+            p.ellipse(x(12.0) + tx, cy - 12.6 * s - lift + ty, 0.9 * s, 0.9 * s, EAR);
         }
 
         let glow = open.min(1.0) * 0.65 + 0.35;
@@ -206,7 +328,7 @@ impl Cat {
             let (ex, ey) = (cx + (side * 6.5 + lx * 0.8) * s, cy + (0.8 + ly) * s);
             // Big, round kitten eyes.
             let w = 2.9 * s;
-            let h = (open * 3.3 * blink).max(0.7) * s;
+            let h = (open * 3.3 * blink * if side > 0.0 { wink } else { 1.0 }).max(0.7) * s;
             if seen > 0.01 {
                 p.ellipse(ex, ey, w * 2.0, 1.4 * s + h * 1.4, alpha(EYE, 0.10 * glow * seen));
                 p.ellipse(ex, ey, w * 1.45, 0.7 * s + h * 1.2, alpha(EYE, 0.16 * glow * seen));
@@ -237,9 +359,15 @@ impl Cat {
         }
         // A soft rounded nose rather than a sharp wedge.
         p.ellipse(nx, ny + 0.35 * s, 1.15 * s, 0.75 * s, NOSE);
-        // The little ω mouth.
-        for side in [-1.0f32, 1.0] {
-            p.arc(nx + side * 0.95 * s, ny + 1.1 * s, 0.95 * s, 10.0, 160.0, MOUTH, 0.5 * s);
+        if yawn > 0.05 {
+            // A round, open yawn in place of the ω.
+            p.ellipse(nx, ny + 2.2 * s, 1.4 * s * yawn, 1.9 * s * yawn, MOUTH);
+            p.ellipse(nx, ny + 2.6 * s, 0.9 * s * yawn, 1.1 * s * yawn, PUPIL);
+        } else {
+            // The little ω mouth.
+            for side in [-1.0f32, 1.0] {
+                p.arc(nx + side * 0.95 * s, ny + 1.1 * s, 0.95 * s, 10.0, 160.0, MOUTH, 0.5 * s);
+            }
         }
         for side in [-1.0f32, 1.0] {
             let x0 = nx + side * 4.0 * s;
@@ -255,6 +383,15 @@ impl Cat {
                 let z = Rect::new(cx + (f * 6.0 + 14.0) * s - 4.0, cy - 8.0 * f * s - 14.0, 10.0, 10.0);
                 p.text("z", z, Font::Small, alpha(ZZZ, 0.7 * (f * PI).sin()), Align::Left);
             }
+        }
+        if let Some((Trick::Purr, k)) = trick {
+            // A little heart floats up beside the head.
+            let f = (k / Trick::Purr.secs()).min(1.0);
+            let (hx, hy, r) = (cx + 17.0 * s, cy - (4.0 + 8.0 * f) * s, 1.1 * s);
+            let c = alpha(HEART, (f * PI).sin());
+            p.ellipse(hx - r * 0.8, hy, r, r, c);
+            p.ellipse(hx + r * 0.8, hy, r, r, c);
+            p.triangle([(hx - r * 1.75, hy + r * 0.3), (hx + r * 1.75, hy + r * 0.3), (hx, hy + r * 2.4)], c);
         }
         if paw > 0.01 {
             // Rises from below the notch edge and waves hello.
@@ -316,5 +453,28 @@ mod tests {
         let mut cat = Cat::new(t0);
         assert!(!cat.busy(at(t0, 1.0)), "awake and settled before its first blink");
         assert!(cat.busy(at(t0, 3.0)), "first blink is due");
+    }
+
+    #[test]
+    fn plays_a_trick_then_rests() {
+        let t0 = Instant::now();
+        let mut cat = Cat::new(t0);
+        cat.step(at(t0, 8.1), 0.016);
+        let (k, _) = cat.trick(at(t0, 8.1)).expect("a trick starts after 8 s");
+        cat.step(at(t0, 8.2 + k.secs()), 0.016);
+        assert!(cat.trick.is_none() && cat.next_trick > at(t0, 14.0), "rests 6-15 s before the next");
+        cat.idle(15_000, false, at(t0, 20.0));
+        assert!(cat.trick.is_none(), "dozing off cancels tricks");
+    }
+
+    #[test]
+    fn reacts_toward_the_click_only_when_awake() {
+        let t0 = Instant::now();
+        let mut cat = Cat::new(t0);
+        cat.react(Trick::Peek, gaze(-600.0, 0.0), t0);
+        assert_eq!(cat.target(at(t0, 0.1)).eye, (-3.5, 0.0), "looks at the click");
+        cat.idle(15_000, false, t0);
+        cat.react(Trick::Cheer, (0.0, 0.0), t0);
+        assert!(cat.trick.is_none(), "a dozing cat doesn't react");
     }
 }

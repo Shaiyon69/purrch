@@ -95,12 +95,21 @@ fn search(query: &str) -> windows::core::Result<Vec<(f64, Option<String>)>> {
     let client = HttpClient::new()?;
     client.DefaultRequestHeaders()?.UserAgent()?.TryParseAdd(&HSTRING::from(USER_AGENT))?;
     let uri = Uri::CreateUri(&HSTRING::from(format!("https://lrclib.net/api/search?{query}")))?;
-    let body = client.GetStringAsync(&uri)?.get()?;
-    let items = JsonArray::Parse(&body)?;
+    parse_results(&client.GetStringAsync(&uri)?.get()?)
+}
+
+/// (duration, synced lyrics) per search result. Either field can be null, so neither may fail
+/// the whole list: one entry with `"duration": null` used to hide every other match.
+fn parse_results(body: &HSTRING) -> windows::core::Result<Vec<(f64, Option<String>)>> {
+    let items = JsonArray::Parse(body)?;
     let mut out = Vec::new();
     for i in 0..items.Size()? {
-        let item = items.GetObjectAt(i)?;
-        let duration = item.GetNamedNumberOrDefault(h!("duration"), 0.0)?;
+        let Ok(item) = items.GetObjectAt(i) else { continue };
+        let duration = item
+            .GetNamedValue(h!("duration"))
+            .ok()
+            .and_then(|v| (v.ValueType().ok()? == JsonValueType::Number).then(|| v.GetNumber().ok()).flatten())
+            .unwrap_or(0.0);
         let synced = item.GetNamedValue(h!("syncedLyrics")).ok().and_then(|v| {
             (v.ValueType().ok()? == JsonValueType::String).then(|| v.GetString().ok().map(|s| s.to_string())).flatten()
         });
@@ -109,15 +118,61 @@ fn search(query: &str) -> windows::core::Result<Vec<(f64, Option<String>)>> {
     Ok(out)
 }
 
-/// Blocking network call; run it off the UI thread.
-pub fn fetch(title: &str, artist: &str, length: Duration) -> Option<Lines> {
-    let title = clean_title(title);
-    let exact = format!("track_name={}&artist_name={}", encode(title), encode(artist));
-    if let Some(lines) = search(&exact).ok().and_then(|r| pick(&r, length)) {
-        return Some(lines);
+/// YouTube channel names: "Artist - Topic", "ArtistVEVO".
+pub fn clean_artist(artist: &str) -> &str {
+    let a = artist.strip_suffix(" - Topic").unwrap_or(artist);
+    a.strip_suffix("VEVO").unwrap_or(a).trim()
+}
+
+/// Drops "(Official Video)" and "[Lyrics]" style extras but keeps a "Artist - Song" dash.
+pub fn strip_brackets(title: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    for ch in title.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
     }
-    let loose = format!("q={}", encode(&format!("{title} {artist}")));
-    search(&loose).ok().and_then(|r| pick(&r, length))
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The searches to try, best first. Browsers often title videos "Artist - Song".
+pub fn queries(title: &str, artist: &str) -> Vec<String> {
+    let channel = clean_artist(artist) != artist;
+    let artist = clean_artist(artist);
+    let bare = strip_brackets(title);
+    let mut out = vec![format!("track_name={}&artist_name={}", encode(clean_title(title)), encode(artist))];
+    if let Some((by, song)) = bare.split_once(" - ") {
+        let split = format!("track_name={}&artist_name={}", encode(song.trim()), encode(by.trim()));
+        // A channel name, or the artist again before the dash, means "Artist - Song": the plain
+        // title query would search for the artist's name as a song and can match the wrong one.
+        if channel || by.trim().eq_ignore_ascii_case(artist) {
+            out.insert(0, split);
+        } else {
+            out.push(split);
+        }
+    }
+    out.push(format!("q={}", encode(&format!("{bare} {artist}"))));
+    out
+}
+
+/// Blocking network calls, run side by side; call it off the UI thread.
+/// Err only when every search failed to reach LRCLIB, so the caller can retry.
+pub fn fetch(title: &str, artist: &str, length: Duration) -> windows::core::Result<Option<Lines>> {
+    let results: Vec<_> = std::thread::scope(|s| {
+        let jobs: Vec<_> = queries(title, artist).into_iter().map(|q| s.spawn(move || search(&q))).collect();
+        jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| Err(windows::core::Error::empty()))).collect()
+    });
+    if let Some(lines) = results.iter().flatten().find_map(|r| pick(r, length)) {
+        return Ok(Some(lines));
+    }
+    if results.iter().all(Result::is_err) {
+        return Err(results.into_iter().find_map(Result::err).unwrap_or_else(windows::core::Error::empty));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -129,6 +184,27 @@ mod tests {
         assert_eq!(clean_title("Song (Remastered 2011)"), "Song");
         assert_eq!(clean_title("Song - Radio Edit [Live]"), "Song");
         assert_eq!(clean_title("Plain"), "Plain");
+    }
+
+    #[test]
+    fn null_fields_keep_the_other_results() {
+        let body = HSTRING::from(r#"[{"duration":null,"syncedLyrics":"[00:01.00]a"},{"duration":263.0,"syncedLyrics":null},{"duration":263.0,"syncedLyrics":"[00:01.00]b"}]"#);
+        let r = parse_results(&body).unwrap();
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].0, 0.0);
+        assert_eq!(pick(&r, Duration::from_secs(262)).unwrap()[0].1, "b");
+    }
+
+    #[test]
+    fn splits_browser_titles() {
+        assert_eq!(clean_artist("Adele - Topic"), "Adele");
+        assert_eq!(clean_artist("AdeleVEVO"), "Adele");
+        assert_eq!(strip_brackets("Adele - Hello (Official Video) [4K]"), "Adele - Hello");
+        let q = queries("Adele - Hello (Official Video)", "AdeleVEVO");
+        assert_eq!(q[0], "track_name=Hello&artist_name=Adele", "channel uploads search the split first");
+        assert_eq!(q[2], "q=Adele%20-%20Hello%20Adele");
+        assert_eq!(queries("Song - Radio Edit", "Band")[0], "track_name=Song&artist_name=Band", "a real artist keeps its title first");
+        assert_eq!(queries("Hello", "Adele").len(), 2, "no dash, no split query");
     }
 
     #[test]

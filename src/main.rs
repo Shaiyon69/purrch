@@ -127,8 +127,8 @@ impl State {
         let (cx, cy) = self.app.cat_pos();
         let dx = (pt.x - self.origin.x) as f32 / self.scale - cx;
         let dy = (pt.y - self.origin.y) as f32 / self.scale - cy;
-        // Same reach as Nusa's mascot: a few DIPs sideways, a little more downward than up.
-        let look = ((dx / 60.0).clamp(-3.5, 3.5), (dy / 80.0).clamp(-1.0, 2.0));
+        // Same reach as Nusa's mascot.
+        let look = cat::gaze(dx, dy);
         let old = self.app.mascot.look;
         let moved = (look.0 - old.0).abs() > 0.05 || (look.1 - old.1).abs() > 0.05;
         self.app.mascot.look = look;
@@ -265,6 +265,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     let caps = s.app.poll_caps();
                     if caps {
                         s.start_anim();
+                    }
+                    // Lyric lines in the closed pill change faster than the 1 s tick.
+                    if s.app.poll_pill_lyric() {
+                        s.start_anim();
+                    }
+                    if s.app.closed() {
+                        s.refresh();
                     }
                     let now = Instant::now();
                     if s.app.cat && State::idle_ms() < 400 {

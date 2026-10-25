@@ -3,6 +3,7 @@
 
 use crate::lyrics::{self, Lines};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use windows::Foundation::IAsyncOperation;
@@ -137,15 +138,22 @@ fn track_key(t: &Track) -> String {
 fn run(shared: Arc<Mutex<Snapshot>>, cmds: Receiver<Cmd>, hwnd: isize) -> windows::core::Result<()> {
     let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()?.get()?;
     let mut last_key = String::new();
+    // Lyrics already found this run, so going back to a song shows them at once.
+    let cache: Arc<Mutex<HashMap<String, Lines>>> = Arc::default();
     loop {
         let session = manager.GetCurrentSession().ok();
         let track = session.as_ref().and_then(|s| read_track(s).ok());
         let key = track.as_ref().map_or(String::new(), track_key);
         let changed = key != last_key;
+        let cached = cache.lock().ok().and_then(|c| c.get(&key).cloned());
         if let Ok(mut snap) = shared.lock() {
             snap.track = track.clone();
             if changed {
-                snap.lyrics = if track.is_some() { LyricState::Loading } else { LyricState::None };
+                snap.lyrics = match (&track, cached.clone()) {
+                    (None, _) => LyricState::None,
+                    (Some(_), Some(lines)) => LyricState::Found(lines),
+                    (Some(_), None) => LyricState::Loading,
+                };
             }
         }
         notify(hwnd);
@@ -153,24 +161,41 @@ fn run(shared: Arc<Mutex<Snapshot>>, cmds: Receiver<Cmd>, hwnd: isize) -> window
         if changed {
             last_key = key;
             if let (Some(s), Some(t)) = (&session, &track) {
+                // Players send an empty title mid-switch; the real one arrives as another change.
+                if cached.is_none() && !t.title.is_empty() {
+                    // Started before the album art read so lyrics arrive as fast as the track does.
+                    // The lookup is a network call; off this thread so play/pause/seek stay instant.
+                    let (shared, cache, t, key) = (shared.clone(), cache.clone(), t.clone(), last_key.clone());
+                    std::thread::spawn(move || {
+                        let current = || shared.lock().ok().is_some_and(|s| s.track.as_ref().is_some_and(|now| track_key(now) == key));
+                        // A failed connection retries a few times instead of reporting no lyrics.
+                        let mut found = lyrics::fetch(&t.title, &t.artist, t.length);
+                        for _ in 0..3 {
+                            if found.is_ok() || !current() {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_secs(2));
+                            found = lyrics::fetch(&t.title, &t.artist, t.length);
+                        }
+                        let found = found.ok().flatten();
+                        if let (Some(lines), Ok(mut c)) = (&found, cache.lock()) {
+                            c.insert(key.clone(), lines.clone());
+                        }
+                        if let Ok(mut snap) = shared.lock() {
+                            // The song may have changed while this was loading.
+                            if snap.track.as_ref().is_some_and(|now| track_key(now) == key) {
+                                snap.lyrics = found.map_or(LyricState::Missing, LyricState::Found);
+                            }
+                        }
+                        notify(hwnd);
+                    });
+                }
                 let art = read_art(s).ok().filter(|b| !b.is_empty()).map(Arc::new);
                 if let Ok(mut snap) = shared.lock() {
                     snap.art = art;
                     snap.art_id += 1;
                 }
                 notify(hwnd);
-                // The lookup is a network call; off this thread so play/pause/seek stay instant.
-                let (shared, t, key) = (shared.clone(), t.clone(), last_key.clone());
-                std::thread::spawn(move || {
-                    let found = lyrics::fetch(&t.title, &t.artist, t.length);
-                    if let Ok(mut snap) = shared.lock() {
-                        // The song may have changed while this was loading.
-                        if snap.track.as_ref().is_some_and(|now| track_key(now) == key) {
-                            snap.lyrics = found.map_or(LyricState::Missing, LyricState::Found);
-                        }
-                    }
-                    notify(hwnd);
-                });
             }
         }
 

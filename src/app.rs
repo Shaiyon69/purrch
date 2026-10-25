@@ -1,4 +1,4 @@
-use crate::cat::Cat;
+use crate::cat::{self, Cat, Trick};
 use crate::lyrics;
 use crate::media::{self, LyricState, Media};
 use crate::pomodoro::{Mode, Pomodoro};
@@ -23,6 +23,10 @@ const OPEN_W: f32 = 420.0;
 const LYRICS_W: f32 = 520.0;
 const OPEN_H: f32 = 140.0;
 const PILL_H: f32 = 30.0;
+/// The collapsed pill while it carries a lyric line.
+const LYRIC_PILL_W: f32 = 420.0;
+/// One lyric line rolling over to the next in the pill.
+const LINE_SECS: f32 = 0.42;
 /// Widest concave fillet where the notch meets the top edge.
 const SHOULDER: f32 = 10.0;
 const SETTINGS: &str = "settings.txt";
@@ -245,6 +249,9 @@ pub struct App {
     /// 0 = normal player, 1 = widened lyrics view.
     wide: f32,
     wide_vel: f32,
+    /// The lyrics button was pressed: the player morphs between layouts until `wide` settles.
+    /// Page turns leave it off, so they slide the finished lyrics view instead.
+    ly_morph: bool,
     /// The slider under a held mouse button, with its hit area to map the cursor onto.
     scrub: Option<(Slider, Rect)>,
     /// Where the progress bar is being dragged to; sent as a seek on release.
@@ -263,6 +270,10 @@ pub struct App {
     shelf_cache: HashMap<PathBuf, (String, Option<ID2D1Bitmap>)>,
     /// When each just-dropped item starts falling in.
     shelf_added: Vec<(PathBuf, Instant)>,
+    /// Closed pill size as drawn, gliding toward `pill_width()` x `pill_height()`.
+    pill_size: (f32, f32),
+    /// Lyric line in the pill and the one it replaced, rolling over since the instant.
+    pill_line: (String, String, Instant),
 }
 
 /// Moves `v` toward `target` at `rate` per second (exponential), snapping when close.
@@ -316,6 +327,7 @@ impl App {
             has_track: false,
             wide: 0.0,
             wide_vel: 0.0,
+            ly_morph: false,
             scrub: None,
             seek_to: None,
             volume: media::Volume::open(),
@@ -327,7 +339,10 @@ impl App {
             drag_since: Instant::now(),
             shelf_cache: HashMap::new(),
             shelf_added: Vec::new(),
+            pill_size: (0.0, PILL_H),
+            pill_line: (String::new(), String::new(), Instant::now()),
         };
+        app.pill_size.0 = app.pill_width();
         app.water.new_day(clock().day);
         app
     }
@@ -553,6 +568,9 @@ impl App {
         if (wide - self.wide).abs() < 0.002 && self.wide_vel.abs() < 0.05 {
             (self.wide, self.wide_vel) = (wide, 0.0);
         }
+        if self.wide == wide {
+            self.ly_morph = false;
+        }
         self.drag_shown = approach(self.drag_shown, self.drag_hover as u8 as f32, dt, 10.0);
         // Slightly underdamped, so a new line settles with a small overshoot.
         const LY_OMEGA: f32 = 11.0;
@@ -568,6 +586,14 @@ impl App {
             self.ly_vel = 0.0;
         }
         self.shelf_added.retain(|(_, at)| now < *at + Duration::from_secs(1));
+        // Grows with an ease-out, shrinks a little quicker: leaving should never feel like waiting.
+        let (pw, ph) = (self.pill_width(), self.pill_height());
+        if self.reduced_motion {
+            self.pill_size = (pw, ph);
+        }
+        let rate = if pw < self.pill_size.0 { 16.0 } else { 11.0 };
+        let glide = |v: f32, to: f32| if (to - v).abs() < 0.3 { to } else { approach(v, to, dt, rate) };
+        self.pill_size = (glide(self.pill_size.0, pw), glide(self.pill_size.1, ph));
         let water = self.water_target();
         self.water_shown += (water - self.water_shown) * (1.0 - (-dt * 10.0).exp());
         if (water - self.water_shown).abs() < 0.002 {
@@ -595,6 +621,21 @@ impl App {
             || self.drag_hover
             || self.drag_shown != self.drag_hover as u8 as f32
             || !self.shelf_added.is_empty()
+            || self.pill_size != (self.pill_width(), self.pill_height())
+            || self.pill_line.2.elapsed().as_secs_f32() < LINE_SECS
+    }
+
+    /// Polled often; returns true when the pill's lyric line changed and should roll over.
+    pub fn poll_pill_lyric(&mut self) -> bool {
+        let line = self.pill_lyric().unwrap_or_default();
+        if line == self.pill_line.0 {
+            return false;
+        }
+        let old = std::mem::replace(&mut self.pill_line.0, line);
+        self.pill_line.1 = old;
+        self.pill_line.2 = Instant::now();
+        self.reduced_motion = !animations_enabled();
+        true
     }
 
     /// Music page with lyrics switched on: the widened, split panel.
@@ -625,7 +666,8 @@ impl App {
     pub fn pill_key(&self) -> String {
         let label = if self.pomo.running() { mmss(self.pomo.remaining(Instant::now())) } else { hhmm(clock().now) };
         let toast = self.toast.as_ref().map_or("", |t| t.title.as_str());
-        format!("{label}|{toast}|{}|{:?}|{}|{}", self.water.taken, self.mascot.mood, self.cat, self.compact)
+        let lyric = self.pill_lyric().unwrap_or_default();
+        format!("{label}|{toast}|{}|{:?}|{}|{}|{lyric}", self.water.taken, self.mascot.mood, self.cat, self.compact)
     }
 
     /// Area the notch covers right now, shoulders included, for partial repaints.
@@ -643,19 +685,39 @@ impl App {
     /// The cat walks from the pill's left end to the panel's top-right corner as it opens.
     fn cat_place(&self) -> (f32, f32, f32) {
         let t = self.anim.clamp(0.0, 1.0);
-        let pill_x = (CANVAS_W - self.pill_width()) / 2.0 + 22.0;
+        let pill_x = (CANVAS_W - self.pill_size.0) / 2.0 + 22.0;
         let open_x = (CANVAS_W + self.open_w()) / 2.0 - 32.0;
         // A small swell mid-journey so it reads as a hop, not a slide.
         let s = 0.7 * (1.0 + 0.18 * (t * std::f32::consts::PI).sin());
-        (lerp(pill_x, open_x, t), lerp(17.0, 19.0, t), s)
+        (lerp(pill_x, open_x, t), lerp(self.pill_size.1 / 2.0 + 2.0, 19.0, t), s)
     }
 
     fn pill_width(&self) -> f32 {
         match (&self.toast, self.compact) {
             (Some(_), _) => 320.0,
             (None, true) => 120.0,
+            // Fixed width while lyrics run, so the notch doesn't jump with every line.
+            (None, false) if self.pill_lyric().is_some() => LYRIC_PILL_W,
             (None, false) => 150.0,
         }
+    }
+
+    /// A touch taller while it carries a lyric line.
+    fn pill_height(&self) -> f32 {
+        if self.pill_lyric().is_some() { 36.0 } else { PILL_H }
+    }
+
+    /// Line being sung, shown between the cat and the clock while collapsed with lyrics on.
+    /// Empty between verses; None when paused or before the first line.
+    fn pill_lyric(&self) -> Option<String> {
+        if !self.show_lyrics || self.compact || self.toast.is_some() {
+            return None;
+        }
+        // Read in place: snapshot() would clone every lyric line, and this runs several times a frame.
+        let snap = self.media.as_ref()?.shared.lock().ok()?;
+        let track = snap.track.as_ref().filter(|t| t.playing)?;
+        let LyricState::Found(lines) = &snap.lyrics else { return None };
+        Some(lines[lyrics::current(lines, track.position())?].1.clone())
     }
 
     pub fn tick(&mut self, idle_ms: u32) {
@@ -739,9 +801,27 @@ impl App {
     }
 
     pub fn click(&mut self, x: f32, y: f32) {
-        let Some(&(_, action)) = self.hits.iter().rev().find(|(r, _)| r.contains(x, y)) else { return };
-        let c = clock();
         let now = Instant::now();
+        let hit = self.hits.iter().rev().find(|(r, _)| r.contains(x, y)).map(|&(_, a)| a);
+        if self.cat {
+            let (cx, cy) = self.cat_pos();
+            let reaction = match hit {
+                // Clicking the cat itself pets it.
+                None if (x - cx).hypot(y - cy) < 16.0 => Some(Trick::Purr),
+                None => None,
+                Some(Action::Sip | Action::PomoStartNext) => Some(Trick::Cheer),
+                Some(Action::PomoToggle) if !self.pomo.running() => Some(Trick::Cheer),
+                Some(Action::TodoToggle(i)) if self.todo.tasks.get(i).is_some_and(|t| !t.done) => Some(Trick::Cheer),
+                Some(Action::TodoDelete(_) | Action::ShelfRemove(_) | Action::ShelfClear | Action::Reset) => Some(Trick::Startle),
+                Some(Action::Media(media::Cmd::Next | media::Cmd::Prev)) => Some(Trick::Groove),
+                Some(_) => Some(Trick::Peek),
+            };
+            if let Some(r) = reaction {
+                self.mascot.react(r, cat::gaze(x - cx, y - cy), now);
+            }
+        }
+        let Some(action) = hit else { return };
+        let c = clock();
         match action {
             Action::Tab(t) => {
                 let dir = (Self::page_index(t) - Self::page_index(self.tab)).signum() as f32;
@@ -753,7 +833,10 @@ impl App {
                     self.go(t, dir);
                 }
             }
-            Action::Lyrics => self.show_lyrics = !self.show_lyrics,
+            Action::Lyrics => {
+                self.show_lyrics = !self.show_lyrics;
+                self.ly_morph = true;
+            }
             Action::WaterChart => self.water_chart = !self.water_chart,
             Action::Sip => {
                 self.water.sip(c.hour);
@@ -863,23 +946,25 @@ impl App {
     fn panel(&self) -> (f32, f32, f32) {
         // The spring already eases; clamp in case a reversal nudges it past the ends.
         let t = self.anim.clamp(0.0, 1.0);
-        let pill_w = self.pill_width();
-        let w = lerp(pill_w, self.open_w(), t);
-        ((CANVAS_W - w) / 2.0, w, lerp(PILL_H, OPEN_H, t))
+        let w = lerp(self.pill_size.0, self.open_w(), t);
+        ((CANVAS_W - w) / 2.0, w, lerp(self.pill_size.1, OPEN_H, t))
     }
 
     pub fn draw(&mut self, p: &Painter) {
         self.hits.clear();
         let t = self.anim.clamp(0.0, 1.0);
         let (x, w, h) = self.panel();
-        let radius = lerp(PILL_H / 2.0, 24.0, t);
+        let radius = lerp(self.pill_size.1 / 2.0, 24.0, t);
         // Start above the screen edge so only the bottom corners look rounded.
         let shape = Rect::new(x, -radius, w, h + radius);
         p.round(shape, radius, BG);
         p.shoulders(x, w, lerp(8.0, SHOULDER, t), BG);
         let open_x = (CANVAS_W - self.open_w()) / 2.0;
         if t == 0.0 {
+            // Clipped so text laid out for the final size stays inside while the pill resizes.
+            p.push_clip(shape, radius, 1.0);
             self.draw_pill(p, x, w);
+            p.pop_clip();
         } else if t == 1.0 {
             self.draw_open(p, open_x);
         } else {
@@ -975,8 +1060,30 @@ impl App {
         } else {
             (hhmm(clock().now), TEXT)
         };
+        let h = self.pill_size.1;
+        self.draw_pill_lyric(p, h);
         let align = if self.compact { Align::Center } else { Align::Right };
-        p.text(&label, Rect::new(x + 16.0, 0.0, w - 34.0, PILL_H), Font::Body, color, align);
+        p.text(&label, Rect::new(x + 16.0, 0.0, w - 34.0, h), Font::Body, color, align);
+    }
+
+    /// The sung line rolls over like a karaoke screen: the old one lifts away quickly, the new one rises in.
+    /// Laid out at the lyric pill's final size and centred on the notch, so the growing shape reveals it.
+    fn draw_pill_lyric(&self, p: &Painter, h: f32) {
+        let (now, before, at) = &self.pill_line;
+        let t = (at.elapsed().as_secs_f32() / LINE_SECS).min(1.0);
+        let ease = |t: f32| if t >= 1.0 { 1.0 } else { 1.0 - 2f32.powf(-10.0 * t) };
+        let rise = if self.reduced_motion { 0.0 } else { 7.0 };
+        let w = LYRIC_PILL_W - 112.0;
+        let r = Rect::new((CANVAS_W - w) / 2.0, 0.0, w, h);
+        let line = |s: &str, a: f32, dy: f32| {
+            if !s.is_empty() && a > 0.0 {
+                p.scaled(1.0, 0.0, 0.0, dy, || p.text(s, r, Font::Body, Color { a, ..TEXT }, Align::Center));
+            }
+        };
+        let out = ease((t / 0.55).min(1.0));
+        line(before, 1.0 - out, -rise * out);
+        let e = ease(t);
+        line(now, e, rise * (1.0 - e));
     }
 
     fn draw_open(&mut self, p: &Painter, x: f32) {
@@ -985,15 +1092,16 @@ impl App {
             self.draw_header(p, x);
             return self.draw_alert(p, x, alert);
         }
-        // Switching lyrics on or off morphs the player into the other layout while the panel resizes.
-        let lyr = if self.tab == Tab::Music && self.page_from.is_none() && self.has_track { self.wide } else { 0.0 };
-        if lyr == 0.0 {
-            return self.draw_pages(p, x);
+        // Plain pages stay centred while the panel narrows back from the lyrics width.
+        let mx = x + (self.open_w() - OPEN_W) / 2.0;
+        if self.tab != Tab::Music || self.page_from.is_some() || !self.has_track || self.wide == 0.0 {
+            return self.draw_pages(p, x, mx);
         }
+        // Switching lyrics on or off morphs the player into the other layout while the panel resizes.
+        let lyr = if self.ly_morph { self.wide } else { 1.0 };
         // The header and page dots only exist without lyrics, so they fade out as the player moves.
         let keep = self.hits.len();
         if lyr < 1.0 {
-            let mx = x + (self.open_w() - OPEN_W) / 2.0;
             p.push_clip(Rect::new(x, 0.0, self.open_w(), OPEN_H), 0.0, (1.0 - lyr * 2.0).max(0.0));
             self.draw_header(p, mx);
             self.draw_dots(p, mx);
@@ -1005,9 +1113,15 @@ impl App {
         self.draw_lyrics(p, x, lyr);
     }
 
-    /// Header, the current page (sliding if it just changed) and the page dots.
-    fn draw_pages(&mut self, p: &Painter, x: f32) {
-        self.draw_header(p, x);
+    /// Header, the current page (sliding if it just changed) and the page indicator.
+    /// `x` is the panel's left edge, `mx` where a plain-width page starts inside it.
+    fn draw_pages(&mut self, p: &Painter, x: f32, mx: f32) {
+        // Header and indicator make way for the lyrics view, fading with the panel's width.
+        let panel = Rect::new(x, 0.0, self.open_w(), OPEN_H);
+        let chrome = (1.0 - self.wide * 2.0).max(0.0);
+        p.push_clip(panel, 0.0, chrome);
+        self.draw_header(p, mx);
+        p.pop_clip();
         match self.page_from {
             Some((from, dir, at)) => {
                 // The new page slides in from the arrow's side while the old one leaves the other way,
@@ -1015,38 +1129,56 @@ impl App {
                 let t = (at.elapsed().as_secs_f32() / PAGE_SECS).min(1.0);
                 let ease = 1.0 - (1.0 - t).powi(3);
                 let shift = if self.reduced_motion { 0.0 } else { 36.0 * dir };
-                let lane = Rect::new(x + 34.0, 22.0, OPEN_W - 68.0, 100.0);
+                let lane = Rect::new(mx + 34.0, 22.0, OPEN_W - 68.0, 100.0);
                 let out = 1.0 - (t / 0.6).min(1.0);
                 if out > 0.0 {
                     let keep = self.hits.len();
-                    p.push_clip(lane, 0.0, out);
-                    p.offset(-shift * ease);
-                    self.draw_page(p, x, from);
-                    p.offset(0.0);
-                    p.pop_clip();
+                    self.draw_slide(p, x, mx, from, lane, out, -shift * ease);
                     self.hits.truncate(keep);
                 }
-                p.push_clip(lane, 0.0, ease);
-                p.offset(shift * (1.0 - ease));
-                self.draw_page(p, x, self.tab);
-                p.offset(0.0);
-                p.pop_clip();
+                self.draw_slide(p, x, mx, self.tab, lane, ease, shift * (1.0 - ease));
             }
-            None => self.draw_page(p, x, self.tab),
+            None => self.draw_page(p, mx, self.tab),
         }
-        self.draw_dots(p, x);
+        p.push_clip(panel, 0.0, chrome);
+        self.draw_dots(p, mx);
+        p.pop_clip();
     }
 
-    /// Page dots: the current page is a short bar.
+    /// One side of a page slide. With lyrics on, Music slides as the whole lyrics view,
+    /// never the plain player, so turning pages doesn't flash the other layout.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_slide(&mut self, p: &Painter, x: f32, mx: f32, tab: Tab, lane: Rect, alpha: f32, dx: f32) {
+        let lyrics = tab == Tab::Music && self.show_lyrics && self.has_track;
+        p.push_clip(if lyrics { Rect::new(x, 0.0, self.open_w(), OPEN_H) } else { lane }, 0.0, alpha);
+        p.offset(dx);
+        if lyrics {
+            self.draw_lyrics(p, x, 1.0);
+        } else {
+            self.draw_page(p, mx, tab);
+        }
+        p.offset(0.0);
+        p.pop_clip();
+    }
+
+    /// Page indicator: a bright capsule gliding along a faint track, one slot per page.
     fn draw_dots(&mut self, p: &Painter, x: f32) {
-        let gaps = (PAGES.len() - 1) as f32;
-        let mut dx = x + (OPEN_W - (14.0 + gaps * 4.0 + gaps * 5.0)) / 2.0;
-        for tab in PAGES {
-            let on = tab == self.tab;
-            let dw = if on { 14.0 } else { 4.0 };
-            p.round(Rect::new(dx, 128.0, dw, 4.0), 2.0, if on { TEXT } else { DOT });
-            self.hits.push((Rect::new(dx - 2.5, 122.0, dw + 5.0, 16.0), Action::Tab(tab)));
-            dx += dw + 5.0;
+        const SLOT: f32 = 12.0;
+        let n = PAGES.len() as f32;
+        let x0 = x + (OPEN_W - n * SLOT) / 2.0;
+        p.round(Rect::new(x0 - 3.0, 128.0, n * SLOT + 6.0, 4.0), 2.0, Color { a: 0.45, ..DOT });
+        // Follows the page slide's easing, so the capsule lands as the new page does.
+        let to = Self::page_index(self.tab) as f32;
+        let at = match self.page_from {
+            Some((from, _, at)) if !self.reduced_motion => {
+                let t = (at.elapsed().as_secs_f32() / PAGE_SECS).min(1.0);
+                lerp(Self::page_index(from) as f32, to, 1.0 - (1.0 - t).powi(3))
+            }
+            _ => to,
+        };
+        p.round(Rect::new(x0 + at * SLOT - 3.0, 128.0, SLOT + 6.0, 4.0), 2.0, TEXT);
+        for (i, tab) in PAGES.into_iter().enumerate() {
+            self.hits.push((Rect::new(x0 + i as f32 * SLOT, 120.0, SLOT, 18.0), Action::Tab(tab)));
         }
     }
 
@@ -1106,7 +1238,7 @@ impl App {
         self.shape_button(p, Rect::new(cx - 64.0, 96.0, 36.0, 24.0), Shape::Prev, 1.0, Action::Media(media::Cmd::Prev), BG, TEXT);
         self.shape_button(p, Rect::new(cx - 18.0, 96.0, 36.0, 24.0), play, 1.0, Action::Media(media::Cmd::PlayPause), BG, TEXT);
         self.shape_button(p, Rect::new(cx + 28.0, 96.0, 36.0, 24.0), Shape::Next, 1.0, Action::Media(media::Cmd::Next), BG, TEXT);
-        self.draw_volume(p, Rect::new(cx + 72.0, 96.0, 104.0, 24.0), true);
+        self.draw_volume(p, Rect::new(cx + 72.0, 96.0, 104.0, 24.0), 1.0);
     }
 
     /// The progress bar, showing where it is being dragged to while scrubbed.
@@ -1117,17 +1249,25 @@ impl App {
         }
     }
 
-    /// Mute button, a bar for the system volume and, if `output`, a next-device button, filling `r`.
-    fn draw_volume(&mut self, p: &Painter, r: Rect, output: bool) {
+    /// Mute button, a bar for the system volume and a next-device button shown at `output` opacity, filling `r`.
+    fn draw_volume(&mut self, p: &Painter, r: Rect, output: f32) {
         let Some((level, muted)) = self.volume.as_ref().map(|v| (v.level(), v.muted())) else { return };
         let silent = muted || level == 0.0;
         let glyph = if silent { "\u{E74F}" } else { "\u{E767}" };
         self.icon_button(p, Rect::new(r.x, r.y, 22.0, r.h), glyph, Font::Icon, Action::Mute, BG, if muted { FOCUS } else { MUTED });
-        let ow = if output { 26.0 } else { 0.0 };
+        // The bar shrinks as the button fades in, so neither jumps.
+        let ow = 26.0 * output;
         let hit = slider(p, Rect::new(r.x + 28.0, r.y + r.h / 2.0 - 1.5, r.w - 28.0 - ow, 3.0), if muted { 0.0 } else { level });
         self.hits.push((hit, Action::Slider(Slider::Volume)));
-        if output {
-            self.icon_button(p, Rect::new(r.x + r.w - 22.0, r.y, 22.0, r.h), "\u{E7F5}", Font::Icon, Action::OutputNext, BG, MUTED);
+        if output > 0.01 {
+            let keep = self.hits.len();
+            let fg = Color { a: MUTED.a * output, ..MUTED };
+            let fill = Color { a: BG.a * output, ..BG };
+            self.icon_button(p, Rect::new(r.x + r.w - 22.0, r.y, 22.0, r.h), "\u{E7F5}", Font::Icon, Action::OutputNext, fill, fg);
+            // Only clickable once mostly visible.
+            if output < 0.5 {
+                self.hits.truncate(keep);
+            }
         }
     }
 
@@ -1172,12 +1312,13 @@ impl App {
         // Where each part sits on the plain music page (centred as the panel resizes) and here.
         let mx = x + (w - OPEN_W) / 2.0;
         let at = |a: Rect, b: Rect| Rect::new(lerp(a.x, b.x, k), lerp(a.y, b.y, k), lerp(a.w, b.w, k), lerp(a.h, b.h, k));
-        self.draw_art(p, &snap, at(Rect::new(mx + 44.0, 24.0, 52.0, 52.0), Rect::new(x + 22.0, 12.0, 62.0, 62.0)));
+        // Start rects must match draw_music exactly, or the layout jumps when the morph starts or ends.
+        self.draw_art(p, &snap, at(Rect::new(mx + 44.0, 31.0, 48.0, 48.0), Rect::new(x + 22.0, 12.0, 62.0, 62.0)));
         // Fonts and casing differ between the layouts, so the text cross-fades as it moves.
-        let title = at(Rect::new(mx + 110.0, 32.0, OPEN_W - 154.0, 20.0), Rect::new(x + 100.0, 37.0, 144.0, 20.0));
+        let title = at(Rect::new(mx + 110.0, 36.0, OPEN_W - 154.0, 20.0), Rect::new(x + 100.0, 37.0, 144.0, 20.0));
         p.text(&track.title, title, Font::Body, fade(TEXT, 1.0 - k), Align::Left);
         p.text(&track.title, title, Font::Title, fade(TEXT, k), Align::Left);
-        let artist = at(Rect::new(mx + 110.0, 51.0, OPEN_W - 154.0, 16.0), Rect::new(x + 100.0, 56.0, 144.0, 14.0));
+        let artist = at(Rect::new(mx + 110.0, 55.0, OPEN_W - 154.0, 16.0), Rect::new(x + 100.0, 56.0, 144.0, 14.0));
         p.text(&track.artist.to_uppercase(), artist, Font::Small, fade(MUTED, 1.0 - k), Align::Left);
         p.text(&track.artist, artist, Font::Small, fade(MUTED, k), Align::Left);
         self.draw_progress(p, lerp(mx + 44.0, x + 25.0, k), lerp(mx + OPEN_W - 44.0, x + 236.0, k), lerp(86.0, 91.0, k), &track);
@@ -1193,8 +1334,8 @@ impl App {
         self.shape_button(p, pause, play, 1.0, Action::Media(media::Cmd::PlayPause), fill, TEXT);
         let next = at(Rect::new(cx + 28.0, 96.0, 36.0, 24.0), Rect::new(x + 153.0, 106.0, 36.0, 24.0));
         self.shape_button(p, next, Shape::Next, 1.0, Action::Media(media::Cmd::Next), fill, TEXT);
-        // No room for the output button beside the lyrics; it shows again on the plain player.
-        self.draw_volume(p, at(Rect::new(cx + 72.0, 96.0, 104.0, 24.0), Rect::new(x + 192.0, 106.0, 50.0, 24.0)), false);
+        // No room for the output button beside the lyrics; it fades out as the player moves aside.
+        self.draw_volume(p, at(Rect::new(cx + 72.0, 96.0, 104.0, 24.0), Rect::new(x + 192.0, 106.0, 50.0, 24.0)), 1.0 - k);
         p.round(Rect::new(x + 252.0, 22.0, 1.0, 102.0), 0.0, rgba(1.0, 1.0, 1.0, 0.12 * k));
 
         // The list waits until the player has mostly moved aside, then drifts in from the right.
@@ -1202,9 +1343,14 @@ impl App {
         if list > 0.0 {
             let slide = if self.reduced_motion { 0.0 } else { 28.0 * (1.0 - list).powi(2) };
             p.push_clip(Rect::new(x + 256.0, 0.0, w - 256.0, OPEN_H), 0.0, list);
-            p.offset(slide);
+            // Offsets aren't stacked: skip them when settled so a page slide's offset carries the list too.
+            if slide != 0.0 {
+                p.offset(slide);
+            }
             self.draw_lyric_list(p, x, &snap, &track, list >= 0.5);
-            p.offset(0.0);
+            if slide != 0.0 {
+                p.offset(0.0);
+            }
             p.pop_clip();
         }
     }
@@ -1215,7 +1361,8 @@ impl App {
             LyricState::Found(lines) => lines,
             state => {
                 let msg = if *state == LyricState::Loading { "Loading lyrics…" } else { "Lyrics not available" };
-                p.text(msg, Rect::new(bx, top, lw, bh), Font::Body, MUTED, Align::Left);
+                draw_notes(p, bx + lw / 2.0, top + 50.0);
+                p.text(msg, Rect::new(bx, top + 80.0, lw, 20.0), Font::Small, MUTED, Align::Center);
                 return;
             }
         };
@@ -1570,6 +1717,30 @@ impl App {
 fn drop_icon(p: &Painter, cx: f32, cy: f32, s: f32, c: Color) {
     p.ellipse(cx, cy + 1.5 * s, 3.3 * s, 3.3 * s, c);
     p.triangle([(cx - 3.1 * s, cy + 0.6 * s), (cx + 3.1 * s, cy + 0.6 * s), (cx, cy - 4.6 * s)], c);
+}
+
+/// A row of music notes bobbing in a wave, shown while a song has no lyrics.
+fn draw_notes(p: &Painter, cx: f32, cy: f32) {
+    // Wall-clock phase, so the wave keeps moving across redraws without stored state.
+    let t = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() % 100_000) as f32 / 1000.0;
+    for i in 0..5 {
+        let phase = t * 2.4 - i as f32 * 0.8;
+        let (x, y) = (cx + (i as f32 - 2.0) * 30.0, cy + 5.0 * phase.sin());
+        let c = rgba(1.0, 1.0, 1.0, 0.35 + 0.3 * (0.5 + 0.5 * phase.sin()));
+        // Head sits left of the stem, stem rises 14 DIPs; even notes are a beamed pair.
+        let note = |hx: f32, hy: f32| {
+            p.ellipse(hx, hy, 3.6, 2.8, c);
+            p.line(hx + 3.0, hy, hx + 3.0, hy - 14.0, c, 1.5);
+        };
+        if i % 2 == 0 {
+            note(x - 5.0, y + 2.0);
+            note(x + 5.0, y);
+            p.line(x - 2.0, y - 12.0, x + 8.0, y - 14.0, c, 3.0);
+        } else {
+            note(x, y);
+            p.line(x + 3.0, y - 14.0, x + 7.0, y - 9.0, c, 1.5);
+        }
+    }
 }
 
 fn date_label() -> String {
