@@ -12,16 +12,22 @@ A cat that lives in your notch. Purrch sits at the top of your screen as a small
 
 Right-click the tray icon for *Start with Windows*, *Show the cat*, *Compact notch* and *Quit*.
 
+## Install
+
+Download `PurrchSetup.exe` from the [latest release](https://github.com/Shaiyon69/purrch/releases/latest) and run it. It installs for your user only, with no admin prompt, and adds Purrch to the Start menu. Windows 10 or 11, 64-bit.
+
+The installer is not code-signed yet, so Windows SmartScreen may warn you. Click *More info*, then *Run anyway*.
+
 ## Build
 
-Requires Windows 10 or 11 and Rust with the MSVC toolchain.
+Requires Windows 10 or 11 and Rust with the MSVC toolchain (including the Windows SDK, which embeds the icon).
 
 ```
 cargo build --release
 cargo test
 ```
 
-The app is `target\release\purrch.exe`.
+The app is `target\release\purrch.exe`. To build the installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run `iscc installer.iss`; it writes `dist\PurrchSetup.exe`.
 
 ## Your data
 
