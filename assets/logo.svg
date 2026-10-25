@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Nusa's tile and head shape, wearing the notch cat's face from src/cat.rs (s = 6.5). -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f7f8fc"/>
+      <stop offset="1" stop-color="#e2e6ef"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffc247"/>
+      <stop offset="0.55" stop-color="#ff9a6b"/>
+      <stop offset="1" stop-color="#f2808f"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="head">
+      <path id="headPath" d="M40 150 C40 112 50 94 62 85 L68 54 Q70 43 80 48 L108 69 Q128 64 148 69 L176 48 Q186 43 188 54 L194 85 C206 94 216 112 216 150 C216 187 178 201 128 201 C78 201 40 187 40 150 Z"/>
+    </clipPath>
+    <filter id="blur" x="-20%" y="-50%" width="140%" height="200%"><feGaussianBlur stdDeviation="6"/></filter>
+    <filter id="eyeGlow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="7"/></filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%"><feGaussianBlur stdDeviation="8"/></filter>
+  </defs>
+
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#tile)"/>
+  <ellipse cx="128" cy="206" rx="80" ry="12" fill="#1a1530" opacity="0.18" filter="url(#shadow)"/>
+
+  <g clip-path="url(#head)">
+    <rect width="256" height="256" fill="#0b0b0e"/>
+    <ellipse cx="128" cy="214" rx="108" ry="28" fill="url(#glow)" filter="url(#blur)"/>
+    <ellipse cx="128" cy="78" rx="70" ry="26" fill="url(#gloss)"/>
+  </g>
+
+  <!-- Pink inner ears. -->
+  <g fill="#9e5266" stroke="#9e5266" stroke-width="4" stroke-linejoin="round">
+    <path d="M77 80 L80 59 L98 73 Z"/>
+    <path d="M179 80 L176 59 L158 73 Z"/>
+  </g>
+
+  <!-- Glowing amber kitten eyes with pupils and two shines. -->
+  <g>
+    <ellipse cx="86" cy="126" rx="26" ry="28" fill="#ffc247" opacity="0.35" filter="url(#eyeGlow)"/>
+    <ellipse cx="170" cy="126" rx="26" ry="28" fill="#ffc247" opacity="0.35" filter="url(#eyeGlow)"/>
+    <ellipse cx="86" cy="126" rx="19" ry="21" fill="#ffc247"/>
+    <ellipse cx="170" cy="126" rx="19" ry="21" fill="#ffc247"/>
+    <ellipse cx="86" cy="127.3" rx="12.4" ry="15.4" fill="#0f0800"/>
+    <ellipse cx="170" cy="127.3" rx="12.4" ry="15.4" fill="#0f0800"/>
+    <circle cx="80.8" cy="120.2" r="6.5" fill="#fff" opacity="0.95"/>
+    <circle cx="164.8" cy="120.2" r="6.5" fill="#fff" opacity="0.95"/>
+    <circle cx="91.2" cy="131.2" r="2.9" fill="#fff" opacity="0.95"/>
+    <circle cx="175.2" cy="131.2" r="2.9" fill="#fff" opacity="0.95"/>
+  </g>
+
+  <!-- Blush, nose, the ω mouth and whiskers. -->
+  <ellipse cx="65.6" cy="156" rx="13.7" ry="7.8" fill="#ff809e" opacity="0.5"/>
+  <ellipse cx="190.4" cy="156" rx="13.7" ry="7.8" fill="#ff809e" opacity="0.5"/>
+  <ellipse cx="128" cy="152.3" rx="7.5" ry="4.9" fill="#f2808f"/>
+  <path d="M128 156 A6.2 6.2 0 0 1 115.6 156 M140.4 156 A6.2 6.2 0 0 1 128 156" fill="none" stroke="#cc6b80" stroke-width="3.2" stroke-linecap="round"/>
+  <g stroke="#9a9aa3" stroke-opacity="0.7" stroke-width="2.4" stroke-linecap="round">
+    <line x1="102" y1="154" x2="60" y2="148.7"/>
+    <line x1="102" y1="159.8" x2="60" y2="164.3"/>
+    <line x1="154" y1="154" x2="196" y2="148.7"/>
+    <line x1="154" y1="159.8" x2="196" y2="164.3"/>
+  </g>
+</svg>
