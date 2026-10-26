@@ -1,0 +1,60 @@
+name: Linux
+
+on:
+  push:
+    branches: [main, linux]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  appimage:
+    # gtk4-layer-shell is packaged from 24.04 on, so the AppImage needs glibc 2.39 or newer.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libgtk4-layer-shell-dev pkg-config file
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package AppImage
+        env:
+          # Runners have no FUSE; the tools unpack themselves instead.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          DEPLOY_GTK_VERSION: "4"
+          LINUXDEPLOY: https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+          GTK_PLUGIN: https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/7a3fbc31a9e5075073ff8790f26effbac5f84453/linuxdeploy-plugin-gtk.sh
+        run: |
+          curl -fsSLo linuxdeploy "$LINUXDEPLOY"
+          curl -fsSLo linuxdeploy-plugin-gtk.sh "$GTK_PLUGIN"
+          chmod +x linuxdeploy linuxdeploy-plugin-gtk.sh
+          mkdir -p icon && cp assets/logo.png icon/purrch.png
+          ./linuxdeploy --appdir AppDir \
+            --executable target/release/purrch \
+            --desktop-file packaging/purrch.desktop \
+            --icon-file icon/purrch.png \
+            --plugin gtk \
+            --output appimage
+          mv Purrch-*.AppImage Purrch-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Purrch-x86_64.AppImage
+          path: Purrch-x86_64.AppImage

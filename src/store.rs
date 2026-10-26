@@ -2,8 +2,24 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::{fs, io};
 
+#[cfg(windows)]
 pub fn dir() -> PathBuf {
     PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("Purrch")
+}
+
+/// `$XDG_CONFIG_HOME/purrch`, usually `~/.config/purrch`.
+#[cfg(target_os = "linux")]
+pub fn dir() -> PathBuf {
+    xdg_dir("XDG_CONFIG_HOME", ".config").join("purrch")
+}
+
+/// An XDG base directory, falling back to `~/<fallback>` when the variable is unset.
+#[cfg(target_os = "linux")]
+pub fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(fallback))
 }
 
 pub fn parse(text: &str) -> HashMap<String, String> {

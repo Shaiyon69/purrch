@@ -6,15 +6,12 @@ use crate::status::{self, Net, Power};
 use crate::shelf::{self, Shelf};
 use crate::store;
 use crate::todo::{Task, Todo};
-use crate::ui::{Align, Color, Font, Painter, Rect, rgba};
+use crate::sys::{animations_enabled, chime, local_time};
+use crate::ui::{Align, Color, Font, Image, Painter, Rect, rgba};
 use crate::water::{self, Prompt, Water};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
-use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC};
-use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows::core::w;
 
 pub const CANVAS_W: f32 = 800.0;
 pub const CANVAS_H: f32 = 170.0;
@@ -151,12 +148,12 @@ struct Clock {
 }
 
 fn clock() -> Clock {
-    let t = unsafe { GetLocalTime() };
+    let t = local_time();
     Clock {
-        day: t.wYear as u32 * 10000 + t.wMonth as u32 * 100 + t.wDay as u32,
-        hour: t.wHour as usize,
-        minute: t.wHour * 60 + t.wMinute,
-        now: (t.wHour * 60 + t.wMinute) as f32 + t.wSecond as f32 / 60.0,
+        day: t.year * 10000 + t.month * 100 + t.day,
+        hour: t.hour as usize,
+        minute: (t.hour * 60 + t.minute) as u16,
+        now: (t.hour * 60 + t.minute) as f32 + t.second as f32 / 60.0,
     }
 }
 
@@ -198,12 +195,6 @@ fn slider_frac(hit: Rect, x: f32) -> f32 {
     ((x - hit.x - SLIDER_PAD) / (hit.w - 2.0 * SLIDER_PAD).max(1.0)).clamp(0.0, 1.0)
 }
 
-fn chime() {
-    unsafe {
-        let _ = PlaySoundW(w!("SystemAsterisk"), None, SND_ALIAS | SND_ASYNC);
-    }
-}
-
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
@@ -238,7 +229,7 @@ pub struct App {
     /// Something is being dragged over the notch.
     pub drag_hover: bool,
     pub media: Option<Media>,
-    art: Option<(u64, ID2D1Bitmap, Color)>,
+    art: Option<(u64, Image, Color)>,
     now_playing: String,
     show_lyrics: bool,
     water_chart: bool,
@@ -273,7 +264,7 @@ pub struct App {
     drag_shown: f32,
     drag_since: Instant,
     /// Size labels and shell thumbnails, filled the first time a card is drawn.
-    shelf_cache: HashMap<PathBuf, (String, Option<ID2D1Bitmap>)>,
+    shelf_cache: HashMap<PathBuf, (String, Option<Image>)>,
     /// When each just-dropped item starts falling in.
     shelf_added: Vec<(PathBuf, Instant)>,
     /// Closed pill size as drawn, gliding toward `pill_width()` x `pill_height()`.
@@ -1834,8 +1825,8 @@ fn draw_notes(p: &Painter, cx: f32, cy: f32, count: usize) {
 fn date_label() -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let t = unsafe { GetLocalTime() };
-    format!("{} {} {} {}", DAYS[t.wDayOfWeek as usize % 7], t.wDay, MONTHS[(t.wMonth as usize + 11) % 12], t.wYear)
+    let t = local_time();
+    format!("{} {} {} {}", DAYS[t.weekday as usize % 7], t.day, MONTHS[(t.month as usize + 11) % 12], t.year)
 }
 
 /// Filled media glyph centred on (cx, cy); `s` scales the 14 DIP base height.
@@ -1856,14 +1847,4 @@ fn draw_shape(p: &Painter, shape: Shape, cx: f32, cy: f32, s: f32, c: Color) {
             }
         }
     }
-}
-
-/// Windows "Show animations in Windows" (Settings > Accessibility > Visual effects).
-fn animations_enabled() -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW};
-    let mut on = windows::Win32::Foundation::BOOL(1);
-    unsafe {
-        let _ = SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut _ as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
-    }
-    on.as_bool()
 }

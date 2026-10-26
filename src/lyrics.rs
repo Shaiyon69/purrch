@@ -1,14 +1,24 @@
 //! Synced lyrics from LRCLIB (https://lrclib.net), a free, open lyrics database.
 
 use std::time::Duration;
-use windows::Data::Json::{JsonArray, JsonValueType};
-use windows::Foundation::Uri;
-use windows::Web::Http::HttpClient;
-use windows::core::{HSTRING, h};
 
-const USER_AGENT: &str = "Purrch/0.1 (open-source notch app for Windows)";
+#[cfg(windows)]
+#[path = "win/lyrics.rs"]
+mod imp;
+#[cfg(target_os = "linux")]
+#[path = "linux/lyrics.rs"]
+mod imp;
+
+const USER_AGENT: &str = "Purrch/0.1 (open-source notch app)";
 
 pub type Lines = Vec<(Duration, String)>;
+
+/// LRCLIB could not be reached (or answered with something that isn't a result list).
+#[derive(Debug)]
+pub struct Offline;
+
+/// (duration, synced lyrics) per search result.
+type Results = Vec<(f64, Option<String>)>;
 
 /// Players often append "(Remastered 2011)", "[Live]" or " - Radio Edit", which breaks lookups.
 pub fn clean_title(title: &str) -> &str {
@@ -91,33 +101,6 @@ pub fn pick(results: &[(f64, Option<String>)], length: Duration) -> Option<Lines
         .filter(|l| !l.is_empty())
 }
 
-fn search(query: &str) -> windows::core::Result<Vec<(f64, Option<String>)>> {
-    let client = HttpClient::new()?;
-    client.DefaultRequestHeaders()?.UserAgent()?.TryParseAdd(&HSTRING::from(USER_AGENT))?;
-    let uri = Uri::CreateUri(&HSTRING::from(format!("https://lrclib.net/api/search?{query}")))?;
-    parse_results(&client.GetStringAsync(&uri)?.get()?)
-}
-
-/// (duration, synced lyrics) per search result. Either field can be null, so neither may fail
-/// the whole list: one entry with `"duration": null` used to hide every other match.
-fn parse_results(body: &HSTRING) -> windows::core::Result<Vec<(f64, Option<String>)>> {
-    let items = JsonArray::Parse(body)?;
-    let mut out = Vec::new();
-    for i in 0..items.Size()? {
-        let Ok(item) = items.GetObjectAt(i) else { continue };
-        let duration = item
-            .GetNamedValue(h!("duration"))
-            .ok()
-            .and_then(|v| (v.ValueType().ok()? == JsonValueType::Number).then(|| v.GetNumber().ok()).flatten())
-            .unwrap_or(0.0);
-        let synced = item.GetNamedValue(h!("syncedLyrics")).ok().and_then(|v| {
-            (v.ValueType().ok()? == JsonValueType::String).then(|| v.GetString().ok().map(|s| s.to_string())).flatten()
-        });
-        out.push((duration, synced));
-    }
-    Ok(out)
-}
-
 /// YouTube channel names: "Artist - Topic", "ArtistVEVO".
 pub fn clean_artist(artist: &str) -> &str {
     let a = artist.strip_suffix(" - Topic").unwrap_or(artist);
@@ -161,16 +144,16 @@ pub fn queries(title: &str, artist: &str) -> Vec<String> {
 
 /// Blocking network calls, run side by side; call it off the UI thread.
 /// Err only when every search failed to reach LRCLIB, so the caller can retry.
-pub fn fetch(title: &str, artist: &str, length: Duration) -> windows::core::Result<Option<Lines>> {
+pub fn fetch(title: &str, artist: &str, length: Duration) -> Result<Option<Lines>, Offline> {
     let results: Vec<_> = std::thread::scope(|s| {
-        let jobs: Vec<_> = queries(title, artist).into_iter().map(|q| s.spawn(move || search(&q))).collect();
-        jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| Err(windows::core::Error::empty()))).collect()
+        let jobs: Vec<_> = queries(title, artist).into_iter().map(|q| s.spawn(move || imp::search(&q))).collect();
+        jobs.into_iter().map(|j| j.join().unwrap_or(Err(Offline))).collect()
     });
     if let Some(lines) = results.iter().flatten().find_map(|r| pick(r, length)) {
         return Ok(Some(lines));
     }
     if results.iter().all(Result::is_err) {
-        return Err(results.into_iter().find_map(Result::err).unwrap_or_else(windows::core::Error::empty));
+        return Err(Offline);
     }
     Ok(None)
 }
@@ -188,8 +171,8 @@ mod tests {
 
     #[test]
     fn null_fields_keep_the_other_results() {
-        let body = HSTRING::from(r#"[{"duration":null,"syncedLyrics":"[00:01.00]a"},{"duration":263.0,"syncedLyrics":null},{"duration":263.0,"syncedLyrics":"[00:01.00]b"}]"#);
-        let r = parse_results(&body).unwrap();
+        let body = r#"[{"duration":null,"syncedLyrics":"[00:01.00]a"},{"duration":263.0,"syncedLyrics":null},{"duration":263.0,"syncedLyrics":"[00:01.00]b"}]"#;
+        let r = imp::parse_results(body).unwrap();
         assert_eq!(r.len(), 3);
         assert_eq!(r[0].0, 0.0);
         assert_eq!(pick(&r, Duration::from_secs(262)).unwrap()[0].1, "b");

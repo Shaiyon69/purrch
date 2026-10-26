@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Purrch
+Comment=A cat that lives in your notch
+Exec=purrch
+Icon=purrch
+Categories=Utility;
+Terminal=false
