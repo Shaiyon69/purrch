@@ -59,7 +59,6 @@ jobs:
             --icon-file icon/purrch.png \
             --plugin gtk \
             --output appimage
-          mv Purrch-*.AppImage Purrch-x86_64.AppImage
 
       - uses: actions/upload-artifact@v4
         with:
