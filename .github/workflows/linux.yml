@@ -9,7 +9,7 @@ on:
 
 jobs:
   appimage:
-    # gtk4-layer-shell is packaged from 24.04 on, so the AppImage needs glibc 2.39 or newer.
+    # The AppImage needs the runner's glibc (2.39) or newer.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -17,7 +17,14 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libgtk4-layer-shell-dev pkg-config file
+          sudo apt-get install -y libgtk-4-dev libwayland-dev wayland-protocols meson ninja-build pkg-config file
+
+      # Ubuntu 24.04 doesn't package gtk4-layer-shell, so build a pinned release.
+      - name: Build gtk4-layer-shell
+        run: |
+          git clone --depth 1 --branch v1.3.0 https://github.com/wmww/gtk4-layer-shell.git /tmp/gls
+          meson setup /tmp/gls/build /tmp/gls --prefix=/usr -Dintrospection=false -Dvapi=false -Dsmoke-tests=false -Dexamples=false -Ddocs=false -Dtests=false
+          sudo ninja -C /tmp/gls/build install
 
       - uses: dtolnay/rust-toolchain@stable
         with:

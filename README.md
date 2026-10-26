@@ -71,10 +71,9 @@ It writes `dist\PurrchSetup.exe`.
 
 ### Linux
 
-Requires Rust plus GTK 4.12+ and gtk4-layer-shell development files. On Ubuntu 24.04:
+Requires Rust plus GTK 4.12+ and [gtk4-layer-shell](https://github.com/wmww/gtk4-layer-shell) development files. Ubuntu 24.04 has GTK but not gtk4-layer-shell, so CI builds that from source (see the workflow); distributions that package it (Arch, Fedora, Ubuntu 25.04+) need only:
 
 ```sh
-sudo apt install libgtk-4-dev libgtk4-layer-shell-dev
 cargo build --release
 cargo test
 ```
