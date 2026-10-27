@@ -115,7 +115,7 @@ pub fn about(hwnd: HWND) {
     unsafe {
         MessageBoxW(
             hwnd,
-            w!("Purrch 1.0.1\n\nA cat that lives in your notch.\nOpen source under the MIT license."),
+            w!("Purrch 1.0.2\n\nA cat that lives in your notch.\nOpen source under the MIT license."),
             w!("About Purrch"),
             MB_OK | MB_ICONINFORMATION,
         );
