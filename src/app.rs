@@ -210,6 +210,8 @@ pub struct App {
     alert: Option<Alert>,
     /// Task reminders that came due while another alert was showing.
     queued: VecDeque<Alert>,
+    /// Water nudge held back until the running Focus session ends.
+    held_water: Option<Prompt>,
     pub hover: bool,
     /// 0 = collapsed pill, 1 = fully open panel.
     anim: f32,
@@ -304,6 +306,7 @@ impl App {
             reset_armed: None,
             alert: None,
             queued: VecDeque::new(),
+            held_water: None,
             hover: false,
             anim: 0.0,
             vel: 0.0,
@@ -768,7 +771,12 @@ impl App {
         }
         if let Some(p) = self.water.check(c.now) {
             self.save_water();
-            self.raise(Alert::Water(p));
+            self.held_water = Some(p);
+        }
+        if !(self.pomo.running() && self.pomo.mode == Mode::Focus) {
+            if let Some(p) = self.held_water.take() {
+                self.raise(Alert::Water(p));
+            }
         }
         if let Some(next) = self.pomo.tick(Instant::now()) {
             self.raise(Alert::Pomodoro(next));
