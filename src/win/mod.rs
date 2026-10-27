@@ -75,10 +75,21 @@ impl State {
         self.last_frame = Instant::now();
         // Slides by the notch's own height so it starts moving at once, and fades on the way.
         let peek = self.app.peek();
-        let pos = POINT { x: self.origin.x, y: self.origin.y - ((bounds.h + 4.0) * self.scale * (1.0 - peek)) as i32 };
+        let pos = POINT { x: self.origin.x, y: self.top() - ((bounds.h + 4.0) * self.scale * (1.0 - peek)) as i32 };
         let alpha = (255.0 * peek * peek * (3.0 - 2.0 * peek)) as u8;
         let app = &mut self.app;
         let _ = self.renderer.frame(self.hwnd, dirty, pos, alpha, |p| app.draw(p));
+    }
+
+    /// A full-screen app hides the taskbar, so the notch sits at the screen's top edge over it.
+    fn top(&self) -> i32 {
+        if self.fullscreen { 0 } else { self.origin.y }
+    }
+
+    /// Re-centres on the work area after the taskbar moves or the display changes.
+    fn replace(&mut self) {
+        self.origin = place(self.renderer.size.cx);
+        self.render();
     }
 
     /// Repaints unless the notch is collapsed and the pill would look the same.
@@ -120,7 +131,7 @@ impl State {
             let mut pt = POINT::default();
             let _ = unsafe { GetCursorPos(&mut pt) };
             let mid = self.origin.x + (app::CANVAS_W * self.scale) as i32 / 2;
-            if pt.y <= self.origin.y && ((pt.x - mid).abs() as f32) < 120.0 * self.scale {
+            if pt.y <= 0 && ((pt.x - mid).abs() as f32) < 120.0 * self.scale {
                 self.peeked = true;
                 self.away_since = None;
             } else if self.peeked && !self.app.open() && self.app.closed() {
@@ -169,7 +180,7 @@ impl State {
         }
         let (cx, cy) = self.app.cat_pos();
         let dx = (pt.x - self.origin.x) as f32 / self.scale - cx;
-        let dy = (pt.y - self.origin.y) as f32 / self.scale - cy;
+        let dy = (pt.y - self.top()) as f32 / self.scale - cy;
         // Same reach as Nusa's mascot.
         let look = cat::gaze(dx, dy);
         let old = self.app.mascot.look;
@@ -177,6 +188,17 @@ impl State {
         self.app.mascot.look = look;
         moved
     }
+}
+
+/// Top-centre of the primary monitor's work area, so a taskbar on the top or a side
+/// doesn't cover or off-centre the notch.
+fn place(width: i32) -> POINT {
+    let mut work = RECT::default();
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut work as *mut RECT as _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) };
+    if ok.is_err() {
+        work = RECT { left: 0, top: 0, right: unsafe { GetSystemMetrics(SM_CXSCREEN) }, bottom: 0 };
+    }
+    POINT { x: work.left + (work.right - work.left - width) / 2, y: work.top }
 }
 
 /// The window never activates on click, so take the keyboard explicitly for typing.
@@ -476,6 +498,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             });
             LRESULT(0)
         }
+        WM_SETTINGCHANGE if wp.0 == SPI_SETWORKAREA.0 as usize => {
+            with_state(|s| s.replace());
+            LRESULT(0)
+        }
+        WM_DISPLAYCHANGE => {
+            with_state(|s| s.replace());
+            LRESULT(0)
+        }
         tray::WM_TRAY => {
             on_tray(hwnd, (lp.0 & 0xffff) as u32);
             LRESULT(0)
@@ -523,7 +553,7 @@ pub fn run() -> Result<()> {
 
         let scale = GetDpiForSystem() as f32 / 96.0;
         let (w, h) = ((app::CANVAS_W * scale) as i32, (app::CANVAS_H * scale) as i32);
-        let origin = POINT { x: (GetSystemMetrics(SM_CXSCREEN) - w) / 2, y: 0 };
+        let origin = place(w);
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             w!("PurrchNotch"),
