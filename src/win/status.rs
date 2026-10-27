@@ -6,7 +6,9 @@ use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowRect, IsZoomed};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GWL_STYLE, GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect, IsZoomed, WS_CAPTION,
+};
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CAPITAL};
 use windows::Win32::UI::Shell::{
@@ -29,10 +31,16 @@ pub fn fullscreen_app() -> bool {
 
 /// Browser F11 and many borderless games don't flag the shell as busy, so also check
 /// whether the foreground window covers the whole primary monitor (where the notch sits).
+/// Borderless apps that go "full screen" by maximizing cover only the work area, so a
+/// maximized window counts once it has no title bar; ordinary maximized windows keep one.
 fn covers_primary_monitor() -> bool {
     unsafe {
         let hwnd = GetForegroundWindow();
-        if hwnd.is_invalid() || IsZoomed(hwnd).as_bool() {
+        if hwnd.is_invalid() {
+            return false;
+        }
+        let zoomed = IsZoomed(hwnd).as_bool();
+        if zoomed && GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CAPTION.0 == WS_CAPTION.0 {
             return false;
         }
         // The desktop also covers the monitor.
@@ -51,7 +59,7 @@ fn covers_primary_monitor() -> bool {
         if !GetMonitorInfoW(monitor, &mut info).as_bool() || GetWindowRect(hwnd, &mut r).is_err() {
             return false;
         }
-        let m = info.rcMonitor;
+        let m = if zoomed { info.rcWork } else { info.rcMonitor };
         r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
     }
 }
