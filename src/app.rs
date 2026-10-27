@@ -9,7 +9,7 @@ use crate::todo::{Task, Todo};
 use crate::sys::{animations_enabled, chime, local_time};
 use crate::ui::{Align, Color, Font, Image, Painter, Rect, rgba};
 use crate::water::{self, Prompt, Water};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -82,7 +82,7 @@ pub enum Tab {
     Music,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Alert {
     Water(Prompt),
     Pomodoro(Mode),
@@ -208,6 +208,8 @@ pub struct App {
     water_settings: bool,
     reset_armed: Option<Instant>,
     alert: Option<Alert>,
+    /// Task reminders that came due while another alert was showing.
+    queued: VecDeque<Alert>,
     pub hover: bool,
     /// 0 = collapsed pill, 1 = fully open panel.
     anim: f32,
@@ -301,6 +303,7 @@ impl App {
             water_settings: false,
             reset_armed: None,
             alert: None,
+            queued: VecDeque::new(),
             hover: false,
             anim: 0.0,
             vel: 0.0,
@@ -777,6 +780,11 @@ impl App {
             self.todo.save();
             self.raise(Alert::Task(title));
         }
+        if self.alert.is_none() {
+            if let Some(next) = self.queued.pop_front() {
+                self.raise(next);
+            }
+        }
         self.ticks = self.ticks.wrapping_add(1);
         self.poll_status();
         if self.toast.as_ref().is_some_and(|t| Instant::now() >= t.until) {
@@ -787,9 +795,7 @@ impl App {
     }
 
     fn raise(&mut self, alert: Alert) {
-        // A pomodoro alert outranks a water reminder that is already showing.
-        if self.alert.is_none() || matches!(alert, Alert::Pomodoro(_)) {
-            self.alert = Some(alert);
+        if place_alert(&mut self.alert, &mut self.queued, alert) {
             chime();
         }
     }
@@ -1205,7 +1211,8 @@ impl App {
                 let t = (at.elapsed().as_secs_f32() / PAGE_SECS).min(1.0);
                 let ease = 1.0 - (1.0 - t).powi(3);
                 let shift = if self.reduced_motion { 0.0 } else { 36.0 * dir };
-                let lane = Rect::new(mx + 34.0, 22.0, OPEN_W - 68.0, 100.0);
+                // Bottom stops short of the dots (y 128) but clears the shelf zone's edge (~125 at hover scale).
+                let lane = Rect::new(mx + 34.0, 22.0, OPEN_W - 68.0, 104.0);
                 let out = 1.0 - (t / 0.6).min(1.0);
                 if out > 0.0 {
                     let keep = self.hits.len();
@@ -1846,5 +1853,42 @@ fn draw_shape(p: &Painter, shape: Shape, cx: f32, cy: f32, s: f32, c: Color) {
                 p.triangle([(back, cy - 0.8 * h), (back, cy + 0.8 * h), (back + d * 1.1 * h, cy)], c);
             }
         }
+    }
+}
+
+/// Shows `alert` now or queues it. Returns true when it is shown. A pomodoro alert outranks
+/// whatever is showing; task reminders wait their turn because `Todo::due` fires them only once.
+fn place_alert(current: &mut Option<Alert>, queued: &mut VecDeque<Alert>, alert: Alert) -> bool {
+    if current.is_none() || matches!(alert, Alert::Pomodoro(_)) {
+        if let Some(old @ Alert::Task(_)) = current.replace(alert) {
+            queued.push_front(old);
+        }
+        true
+    } else {
+        if matches!(alert, Alert::Task(_)) {
+            queued.push_back(alert);
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_alerts_wait_instead_of_dropping() {
+        let (mut cur, mut q) = (None, VecDeque::new());
+        assert!(place_alert(&mut cur, &mut q, Alert::Water(Prompt::Drink)));
+        assert!(!place_alert(&mut cur, &mut q, Alert::Task("a".into())));
+        assert!(!place_alert(&mut cur, &mut q, Alert::Water(Prompt::Refill)));
+        assert_eq!(q, [Alert::Task("a".into())]);
+
+        cur = None;
+        let next = q.pop_front().unwrap();
+        assert!(place_alert(&mut cur, &mut q, next));
+        // A pomodoro bumps the shown task back to the front of the queue.
+        assert!(place_alert(&mut cur, &mut q, Alert::Pomodoro(Mode::Short)));
+        assert_eq!(q, [Alert::Task("a".into())]);
     }
 }
