@@ -1,4 +1,4 @@
-//! System status changes that deserve a short pop-up: power, Caps Lock, internet.
+//! System status changes that deserve a short pop-up: power, Caps Lock, internet, mic and camera use.
 
 #[cfg(windows)]
 #[path = "win/status.rs"]
@@ -7,7 +7,9 @@ mod imp;
 #[path = "linux/status.rs"]
 mod imp;
 
-pub use imp::{caps_lock, fullscreen_app, network, power};
+pub use imp::{capture, caps_lock, fullscreen_app, network, power};
+#[cfg(windows)]
+pub use imp::process_name;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Power {
@@ -54,9 +56,35 @@ pub fn network_message(net: Net) -> (String, String) {
     }
 }
 
+/// Which app is using the microphone and camera; `Some("")` when one is in use but unnamed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Capture {
+    pub mic: Option<String>,
+    pub cam: Option<String>,
+}
+
+/// Toast only when a device starts being used, not while it stays in use or when it stops.
+pub fn capture_message(old: &Capture, new: &Capture) -> Option<(String, String)> {
+    let started = |was: &Option<String>, now: &Option<String>| now.clone().filter(|_| was.is_none());
+    started(&old.cam, &new.cam)
+        .map(|app| ("Camera in use".into(), app))
+        .or_else(|| started(&old.mic, &new.mic).map(|app| ("Microphone in use".into(), app)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_toasts_only_when_use_starts() {
+        let idle = Capture::default();
+        let mic = Capture { mic: Some("Discord".into()), cam: None };
+        assert_eq!(capture_message(&idle, &mic), Some(("Microphone in use".into(), "Discord".into())));
+        assert_eq!(capture_message(&mic, &mic), None);
+        assert_eq!(capture_message(&mic, &idle), None);
+        let both = Capture { mic: Some("Discord".into()), cam: Some("Teams".into()) };
+        assert_eq!(capture_message(&mic, &both).unwrap().0, "Camera in use");
+    }
 
     const fn p(plugged: bool, pct: u8) -> Power {
         Power { plugged, percent: Some(pct) }

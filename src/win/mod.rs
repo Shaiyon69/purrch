@@ -10,7 +10,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::DwmFlush;
+use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
+use windows::Win32::System::DataExchange::{
+    AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardOwner, OpenClipboard,
+    SetClipboardData,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::System::Ole::OleInitialize;
 use windows::Win32::System::SystemServices::MK_LBUTTON;
 use windows::Win32::System::SystemInformation::GetTickCount;
@@ -24,6 +31,7 @@ const TIMER_TICK: usize = 1;
 const TIMER_ANIM: usize = 2;
 const TIMER_COLLAPSE: usize = 3;
 const TIMER_EYES: usize = 4;
+const HOTKEY_PICK: i32 = 1;
 const TIMER_OPEN: usize = 5;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_MEDIA: u32 = WM_APP + 2;
@@ -54,6 +62,10 @@ struct State {
     peeked: bool,
     /// When the peeked notch was left alone, to slide it away after a short wait.
     away_since: Option<Instant>,
+    /// Click-through window the cat naps in after straying off the notch.
+    stray: HWND,
+    stray_renderer: Renderer,
+    stray_shown: bool,
 }
 
 thread_local! {
@@ -79,6 +91,22 @@ impl State {
         let alpha = (255.0 * peek * peek * (3.0 - 2.0 * peek)) as u8;
         let app = &mut self.app;
         let _ = self.renderer.frame(self.hwnd, dirty, pos, alpha, |p| app.draw(p));
+        // A full-screen app gets the screen to itself, so the napping cat hides too.
+        let e = self.app.stray_ease();
+        let away = self.app.cat && e > 0.0 && !self.fullscreen;
+        if away {
+            // It fades in while dropping the last few pixels onto the taskbar.
+            let mut pos = stray_pos(self.stray_renderer.size, self.scale);
+            pos.y -= ((1.0 - e) * 10.0 * self.scale) as i32;
+            let app = &self.app;
+            let _ = self.stray_renderer.frame(self.stray, None, pos, (255.0 * e) as u8, |p| app.draw_stray(p));
+        }
+        if away != self.stray_shown {
+            self.stray_shown = away;
+            unsafe {
+                let _ = ShowWindow(self.stray, if away { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            }
+        }
     }
 
     /// A full-screen app hides the taskbar, so the notch sits at the screen's top edge over it.
@@ -108,6 +136,9 @@ impl State {
     }
 
     fn step_anim(&mut self) {
+        if self.app.picking() {
+            self.poll_pick();
+        }
         if !self.app.animate() {
             self.animating = false;
             unsafe {
@@ -119,6 +150,18 @@ impl State {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
+        }
+    }
+
+    /// Samples the pixel under the cursor while Ctrl+Alt stay held; letting go copies its hex code.
+    fn poll_pick(&mut self) {
+        let held = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) < 0 && GetAsyncKeyState(VK_MENU.0 as i32) < 0 };
+        if held {
+            if let Some(rgb) = pixel_under_cursor() {
+                self.app.pick_at(rgb);
+            }
+        } else if let Some(hex) = self.app.finish_pick() {
+            set_clipboard_text(self.hwnd, &hex);
         }
     }
 
@@ -506,6 +549,30 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             with_state(|s| s.replace());
             LRESULT(0)
         }
+        WM_HOTKEY if wp.0 == HOTKEY_PICK as usize => {
+            with_state(|s| {
+                s.app.start_pick();
+                s.start_anim();
+            });
+            LRESULT(0)
+        }
+        WM_CLIPBOARDUPDATE => {
+            if let Some(text) = clipboard_text(hwnd) {
+                with_state(|s| {
+                    if s.app.peek_clipboard(&text) {
+                        s.start_anim();
+                        s.refresh();
+                    }
+                });
+            } else if let Some(path) = shelf::clipboard_screenshot(hwnd) {
+                with_state(|s| {
+                    s.app.catch_screenshot(path);
+                    s.start_anim();
+                    s.refresh();
+                });
+            }
+            LRESULT(0)
+        }
         tray::WM_TRAY => {
             on_tray(hwnd, (lp.0 & 0xffff) as u32);
             LRESULT(0)
@@ -550,6 +617,14 @@ pub fn run() -> Result<()> {
             ..Default::default()
         };
         RegisterClassExW(&class);
+        let stray_class = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(stray_proc),
+            hInstance: instance.into(),
+            lpszClassName: w!("PurrchStray"),
+            ..Default::default()
+        };
+        RegisterClassExW(&stray_class);
 
         let scale = GetDpiForSystem() as f32 / 96.0;
         let (w, h) = ((app::CANVAS_W * scale) as i32, (app::CANVAS_H * scale) as i32);
@@ -569,10 +644,27 @@ pub fn run() -> Result<()> {
             None,
         )?;
 
+        let (sw, sh) = ((app::STRAY_W * scale) as i32, (app::STRAY_H * scale) as i32);
+        let stray = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            w!("PurrchStray"),
+            w!("Purrch cat"),
+            WS_POPUP,
+            0,
+            0,
+            sw,
+            sh,
+            None,
+            None,
+            instance,
+            None,
+        )?;
+
         // COM before App::load: it opens the audio endpoint for the volume controls.
         let ole = OleInitialize(None).is_ok();
         let mut app = App::load();
         app.media = Some(media::Media::start(poster(hwnd, WM_MEDIA)));
+        app.mascot.can_stray = true;
         let state = State {
             hwnd,
             app,
@@ -590,6 +682,9 @@ pub fn run() -> Result<()> {
             fullscreen: false,
             peeked: false,
             away_since: None,
+            stray,
+            stray_renderer: Renderer::new(sw, sh)?,
+            stray_shown: false,
         };
         STATE.with(|s| *s.borrow_mut() = Some(state));
         with_state(|s| s.render());
@@ -599,6 +694,10 @@ pub fn run() -> Result<()> {
         if ole {
             let _ = shelf::DropTarget::register(hwnd, on_drag);
         }
+        // Copied text can earn a peek in the pill (colour, link, sum); without the listener there is none.
+        let _ = AddClipboardFormatListener(hwnd);
+        // Ctrl+Alt+C starts the colour picker; if another app owns the combo there is simply no picker.
+        let _ = RegisterHotKey(hwnd, HOTKEY_PICK, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'C' as u32);
         SetTimer(hwnd, TIMER_TICK, 1000, None);
         SetTimer(hwnd, TIMER_EYES, 120, None);
 
@@ -630,4 +729,78 @@ pub fn run() -> Result<()> {
         }
         Ok(())
     }
+}
+
+/// The clipboard's text, unless it is empty, huge, or Purrch put it there itself.
+fn clipboard_text(hwnd: HWND) -> Option<String> {
+    unsafe {
+        if GetClipboardOwner().is_ok_and(|owner| owner == hwnd) {
+            return None;
+        }
+        OpenClipboard(hwnd).ok()?;
+        let text = GetClipboardData(CF_UNICODETEXT.0 as u32).ok().and_then(|h| {
+            let mem = HGLOBAL(h.0);
+            let ptr = GlobalLock(mem) as *const u16;
+            if ptr.is_null() {
+                return None;
+            }
+            // Only short text can be a colour, link or sum, so stop reading early.
+            let len = (0..512).take_while(|&i| *ptr.add(i) != 0).count();
+            let text = (len < 512).then(|| String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len)));
+            let _ = GlobalUnlock(mem);
+            text
+        });
+        let _ = CloseClipboard();
+        text
+    }
+}
+
+fn pixel_under_cursor() -> Option<(u8, u8, u8)> {
+    unsafe {
+        let mut pt = POINT::default();
+        GetCursorPos(&mut pt).ok()?;
+        let dc = GetDC(None);
+        let c = GetPixel(dc, pt.x, pt.y).0;
+        ReleaseDC(None, dc);
+        // CLR_INVALID: the point is off every screen.
+        (c != 0xFFFF_FFFF).then_some((c as u8, (c >> 8) as u8, (c >> 16) as u8))
+    }
+}
+
+/// Puts text on the clipboard as Purrch, so the clipboard peek ignores it.
+fn set_clipboard_text(hwnd: HWND, text: &str) {
+    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        if OpenClipboard(hwnd).is_err() {
+            return;
+        }
+        let _ = EmptyClipboard();
+        if let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) {
+            let ptr = GlobalLock(mem) as *mut u16;
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+                let _ = GlobalUnlock(mem);
+                // On success the clipboard owns the memory; otherwise free it.
+                if SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(mem.0)).is_err() {
+                    let _ = GlobalFree(mem);
+                }
+            }
+        }
+        let _ = CloseClipboard();
+    }
+}
+
+/// The napping cat sits on the taskbar's top edge, off to the right where windows rarely need clicks.
+fn stray_pos(size: SIZE, scale: f32) -> POINT {
+    let mut work = RECT::default();
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut work as *mut RECT as _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) };
+    if ok.is_err() {
+        work = RECT { left: 0, top: 0, right: unsafe { GetSystemMetrics(SM_CXSCREEN) }, bottom: unsafe { GetSystemMetrics(SM_CYSCREEN) } };
+    }
+    // The loaf's belly sits a few DIPs above the canvas bottom; drop it onto the edge.
+    POINT { x: work.right - size.cx - (120.0 * scale) as i32, y: work.bottom - size.cy + (7.0 * scale) as i32 }
+}
+
+unsafe extern "system" fn stray_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }

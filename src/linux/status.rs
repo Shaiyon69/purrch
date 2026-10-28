@@ -62,3 +62,11 @@ pub fn network() -> Net {
         }
     }
 }
+
+/// Any recording stream on the sound server means an app has the mic open.
+// shortcut: no camera check on Linux, add a PipeWire video node scan if asked.
+pub fn capture() -> super::Capture {
+    let out = std::process::Command::new("pactl").args(["list", "source-outputs", "short"]).output();
+    let mic = out.is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty());
+    super::Capture { mic: mic.then(String::new), cam: None }
+}

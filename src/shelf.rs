@@ -12,7 +12,7 @@ mod imp;
 
 pub use imp::open;
 #[cfg(windows)]
-pub use imp::{DropTarget, drag_out};
+pub use imp::{DropTarget, clipboard_screenshot, drag_out};
 
 pub const FILE: &str = "shelf.txt";
 

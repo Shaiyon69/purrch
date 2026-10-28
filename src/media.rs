@@ -15,7 +15,7 @@ mod imp;
 #[path = "linux/media.rs"]
 mod imp;
 
-pub use imp::{Volume, next_output};
+pub use imp::{Meter, Volume, next_output};
 
 /// Wakes the UI thread after the worker changed the snapshot.
 type Notify = Arc<dyn Fn() + Send + Sync>;

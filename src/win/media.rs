@@ -77,6 +77,25 @@ pub fn send(s: &Session, cmd: Cmd) {
     };
 }
 
+/// Peak level of whatever the default playback device is playing, for the beat pulse.
+pub struct Meter(windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation);
+
+impl Meter {
+    pub fn open() -> Option<Meter> {
+        use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender};
+        use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+        unsafe {
+            let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+            devices.GetDefaultAudioEndpoint(eRender, eConsole).ok()?.Activate(CLSCTX_ALL, None).ok().map(Meter)
+        }
+    }
+
+    /// 0..1, after the system volume is applied.
+    pub fn peak(&self) -> f32 {
+        unsafe { self.0.GetPeakValue().unwrap_or(0.0) }
+    }
+}
+
 /// Master volume of the default playback device, as a 0..1 scalar.
 pub struct Volume(windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume);
 

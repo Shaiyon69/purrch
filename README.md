@@ -25,8 +25,13 @@ Purrch sits at the top of your screen as a small pill and opens into a panel whe
 - **To-do**: a quick task list. Add `@14:30` to a task to get a reminder at that time.
 - **Shelf**: drop files, links or text on the notch to keep them handy, then drag them back out into any app.
 - **Music**: shows what's playing in any app that reports to Windows media controls (MPRIS on Linux), with album art, controls and synced lyrics from [LRCLIB](https://lrclib.net).
-- **Pop-ups**: charger plugged in or out, low battery, Caps Lock, internet lost or back, Bluetooth devices connecting.
-- **The cat**: follows your cursor with its eyes and falls asleep when you step away.
+- **Pop-ups**: charger plugged in or out, low battery, Caps Lock, internet lost or back, Bluetooth devices connecting. While an app uses the microphone or camera, the cat puts on a headset whose mic glows orange (mic) or green (camera; mic only on Linux).
+- **The cat**: follows your cursor with its eyes and falls asleep when you step away. After a long nap it wanders off to sleep on the taskbar, and comes back when you return (Windows).
+- **Feed the cat**: sips, finished tasks and Focus sessions feed it; left hungry it turns grumpy. Good days (8 feeds) in a row earn it a bell, then a scarf.
+- **Music lights**: as soon as music plays, the closed pill's outline glows softly white while thin lights glide around it in both directions, a little faster when the music is loud; the cat nods on the beat (Windows).
+- **Clipboard peek**: copy a hex colour, a link or a sum like `12*7+3`, and the pill shows the swatch, the site or the answer (Windows).
+- **Screenshot catcher**: a Win+Shift+S snip lands in the Shelf on its own.
+- **Colour picker**: press Ctrl+Alt+C and keep holding Ctrl+Alt; the cat's eyes take the colour under the cursor, and letting go copies its hex code.
 - **Stays out of the way**: the notch hides itself while a full-screen app is in front.
 
 ### Tray
@@ -90,8 +95,9 @@ Everything stays on your machine, as plain text in `%APPDATA%\Purrch\` (Linux: `
 | `water.txt` | bottle, goal, hours and today's progress |
 | `todo.txt` | tasks, one per line |
 | `shelf.txt` | paths of shelved items |
+| `pet.txt` | how fed the cat is and its good-day streak |
 
-Dropped links and text snippets are saved as files in `%LOCALAPPDATA%\Purrch\Shelf\` (Linux: `~/.local/share/purrch/shelf/`).
+Dropped links, text snippets and caught screenshots are saved as files in `%LOCALAPPDATA%\Purrch\Shelf\` (Linux: `~/.local/share/purrch/shelf/`).
 
 > [!TIP]
 > The only network request Purrch makes is the lyrics lookup to lrclib.net, which sends the song title and artist. On Linux, album art that a player provides as a web link (Spotify, browsers) is also downloaded from that link.

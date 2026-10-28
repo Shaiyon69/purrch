@@ -175,6 +175,20 @@ fn parse_percent(s: &str) -> Option<f32> {
     word.trim_end_matches('%').parse::<f32>().ok().map(|p| p / 100.0)
 }
 
+/// Peak level of the playback device, for the beat pulse.
+// shortcut: no level reading on Linux, so the notch never pulses there; read a PipeWire monitor stream if asked.
+pub struct Meter;
+
+impl Meter {
+    pub fn open() -> Option<Meter> {
+        None
+    }
+
+    pub fn peak(&self) -> f32 {
+        0.0
+    }
+}
+
 /// Master volume of the default playback device, as a 0..1 scalar.
 pub struct Volume;
 

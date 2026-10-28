@@ -2,7 +2,10 @@ use crate::cat::{self, Cat, Trick};
 use crate::lyrics;
 use crate::media::{self, LyricState, Media};
 use crate::pomodoro::{Mode, Pomodoro};
-use crate::status::{self, Net, Power};
+use crate::beat::Beat;
+use crate::peek::{self, Peek};
+use crate::pet::{self, Food, Pet};
+use crate::status::{self, Capture, Net, Power};
 use crate::shelf::{self, Shelf};
 use crate::store;
 use crate::todo::{Task, Todo};
@@ -20,6 +23,9 @@ const OPEN_W: f32 = 420.0;
 const LYRICS_W: f32 = 520.0;
 const OPEN_H: f32 = 140.0;
 const PILL_H: f32 = 30.0;
+/// Canvas of the window the cat naps in when it strays off the notch.
+pub const STRAY_W: f32 = 76.0;
+pub const STRAY_H: f32 = 48.0;
 /// The collapsed pill while it carries a lyric line: at least this wide, growing to fit
 /// the song's longest line up to the max.
 const LYRIC_PILL_W: f32 = 420.0;
@@ -45,6 +51,11 @@ const MUTED: Color = rgba(0.62, 0.62, 0.66, 1.0);
 const WATER: Color = rgba(0.33, 0.66, 1.0, 1.0);
 const WATER_DEEP: Color = rgba(0.08, 0.2, 0.36, 1.0);
 const FOCUS: Color = rgba(1.0, 0.32, 0.32, 1.0);
+// Glow on the cat's headset mic, phone-style: orange for the mic, green for the camera.
+const MIC: Color = rgba(1.0, 0.62, 0.04, 1.0);
+const CAM: Color = rgba(0.2, 0.84, 0.29, 1.0);
+/// The music outline and its lights.
+const GLOW: Color = rgba(1.0, 1.0, 1.0, 1.0);
 const FOCUS_DEEP: Color = rgba(0.3, 0.08, 0.08, 1.0);
 const TASK: Color = rgba(0.3, 0.85, 0.45, 1.0);
 const SHELF: Color = rgba(0.78, 0.6, 1.0, 1.0);
@@ -71,6 +82,9 @@ enum Ico {
 const TOAST_SECS: u64 = 3;
 /// Page slide length; the outgoing page is gone by 60% of it.
 const PAGE_SECS: f32 = 0.24;
+/// A toast's content fades in while the pill grows, and fades out before it shrinks back.
+const TOAST_IN: f32 = 0.24;
+const TOAST_OUT: f32 = 0.18;
 const TODO_ROWS: usize = 3;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -94,6 +108,8 @@ struct Toast {
     title: String,
     detail: String,
     color: Color,
+    /// Shown since; the content fades and rises in from here.
+    at: Instant,
     until: Instant,
     /// A new song: shown centred as "title | artist", without the status dot.
     song: bool,
@@ -201,6 +217,8 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 
 pub struct App {
     pub water: Water,
+    /// How fed the cat is; sips, finished tasks and Focus sessions feed it.
+    pet: Pet,
     pub pomo: Pomodoro,
     pub cat: bool,
     pub compact: bool,
@@ -226,6 +244,7 @@ pub struct App {
     toast: Option<Toast>,
     power: Option<Power>,
     net: Option<Net>,
+    capture: Option<Capture>,
     caps: Option<bool>,
     ticks: u32,
     pub shelf: Shelf,
@@ -258,6 +277,19 @@ pub struct App {
     /// Where the progress bar is being dragged to; sent as a seek on release.
     seek_to: Option<Duration>,
     volume: Option<media::Volume>,
+    /// Output level for the beat pulse, reopened now and then to follow device switches.
+    meter: Option<media::Meter>,
+    meter_at: Option<Instant>,
+    /// The colour under the cursor while the picker hotkey is held.
+    picking: Option<(u8, u8, u8)>,
+    /// 0 with the cat home in the notch, 1 once it has moved to its nap spot; eased both ways.
+    stray_fade: f32,
+    /// Outline lights: how far faded in, their clock (seconds, sped up by loud music), and a
+    /// slow-moving loudness that nudges their speed.
+    lights: f32,
+    lights_t: f32,
+    energy: f32,
+    beat: Beat,
     /// Lyric list scroll in DIPs from the first line, springing toward `ly_target`.
     ly_pos: f32,
     ly_vel: f32,
@@ -319,6 +351,7 @@ impl App {
             toast: None,
             power: status::power(),
             net: None,
+            capture: None,
             caps: None,
             ticks: 0,
             shelf: Shelf::load(),
@@ -341,6 +374,14 @@ impl App {
             scrub: None,
             seek_to: None,
             volume: media::Volume::open(),
+            meter: None,
+            meter_at: None,
+            picking: None,
+            stray_fade: 0.0,
+            lights: 0.0,
+            lights_t: 0.0,
+            energy: 0.0,
+            beat: Beat::default(),
             ly_pos: 0.0,
             ly_vel: 0.0,
             ly_target: 0.0,
@@ -355,6 +396,10 @@ impl App {
             shown: true,
             peek: 1.0,
             peek_vel: 0.0,
+            pet: {
+                let c = clock();
+                Pet::from_text(&std::fs::read_to_string(store::dir().join(pet::FILE)).unwrap_or_default(), c.day, c.minute)
+            },
         };
         app.pill_size.0 = app.pill_width();
         app.water.new_day(clock().day);
@@ -363,6 +408,26 @@ impl App {
 
     pub fn save_settings(&self) {
         let _ = store::save(SETTINGS, &format!("cat={}\ncompact={}\n", self.cat as u8, self.compact as u8));
+    }
+
+    fn save_pet(&self) {
+        let _ = store::save(pet::FILE, &self.pet.to_text());
+    }
+
+    /// Feeds the cat; a sip or Focus session gets a purr (a finished task already cheers).
+    fn feed(&mut self, food: Food) {
+        let good = self.pet.feed(food);
+        self.save_pet();
+        if self.cat && food != Food::Task {
+            self.mascot.react(cat::Trick::Purr, (0.0, 0.0), Instant::now());
+        }
+        if good {
+            let gift = match self.pet.accessory() {
+                pet::Accessory::Scarf => "a scarf",
+                _ => "a bell",
+            };
+            self.toast("Good day!".into(), format!("The cat earned {gift}"), TASK);
+        }
     }
 
     fn save_water(&self) {
@@ -414,19 +479,33 @@ impl App {
             shelf::DragEvent::Leave => self.drag_hover = false,
             shelf::DragEvent::Drop(paths) => {
                 self.drag_hover = false;
-                // Several files land one after another, like Nusa's cards.
-                let now = Instant::now();
-                let new: Vec<PathBuf> = paths.iter().filter(|p| !self.shelf.items.contains(p)).cloned().collect();
-                let landed = !new.is_empty();
-                for (i, p) in new.into_iter().enumerate() {
-                    self.shelf_added.push((p, now + Duration::from_millis(120 * i as u64)));
-                }
-                self.shelf.add(paths);
-                // New cards go at the end; bring them into view.
-                if landed {
-                    self.shelf_scroll = self.shelf.items.len().saturating_sub(SHELF_COLS);
-                }
+                self.land(paths);
             }
+        }
+    }
+
+    /// A screenshot from the clipboard joins the shelf, and the cat cheers for the catch.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn catch_screenshot(&mut self, path: PathBuf) {
+        self.land(vec![path]);
+        self.toast("Screenshot caught".into(), "Drag it out of the Shelf".into(), WATER);
+        if self.cat {
+            self.mascot.react(cat::Trick::Cheer, (0.0, 0.0), Instant::now());
+        }
+    }
+
+    fn land(&mut self, paths: Vec<PathBuf>) {
+        // Several files land one after another, like Nusa's cards.
+        let now = Instant::now();
+        let new: Vec<PathBuf> = paths.iter().filter(|p| !self.shelf.items.contains(p)).cloned().collect();
+        let landed = !new.is_empty();
+        for (i, p) in new.into_iter().enumerate() {
+            self.shelf_added.push((p, now + Duration::from_millis(120 * i as u64)));
+        }
+        self.shelf.add(paths);
+        // New cards go at the end; bring them into view.
+        if landed {
+            self.shelf_scroll = self.shelf.items.len().saturating_sub(SHELF_COLS);
         }
     }
 
@@ -485,8 +564,71 @@ impl App {
         self.shelf_scroll = (self.shelf_scroll as i32 + delta).clamp(0, max as i32) as usize;
     }
 
+    /// Changes the showing toast in place, so live updates (the colour picker) don't replay its fade-in.
+    fn retoast(&mut self, title: String, detail: String, color: Color) {
+        match &mut self.toast {
+            Some(t) if !t.song => {
+                (t.title, t.detail, t.color) = (title, detail, color);
+                t.until = Instant::now() + Duration::from_secs(TOAST_SECS);
+            }
+            _ => self.toast(title, detail, color),
+        }
+    }
+
     fn toast(&mut self, title: String, detail: String, color: Color) {
-        self.toast = Some(Toast { title, detail, color, until: Instant::now() + Duration::from_secs(TOAST_SECS), song: false });
+        let now = Instant::now();
+        self.toast = Some(Toast { title, detail, color, at: now, until: now + Duration::from_secs(TOAST_SECS), song: false });
+    }
+
+    /// Copied text that is a colour, link or sum gets a peek in the pill; true when one shows.
+    // shortcut: Linux has no clipboard listener yet, so only Windows calls this; add wl-paste --watch if asked.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn peek_clipboard(&mut self, text: &str) -> bool {
+        let Some(found) = peek::classify(text) else { return false };
+        match found {
+            Peek::Color(r, g, b) => {
+                let swatch = rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0);
+                self.toast(peek::rgb_hex(r, g, b), format!("rgb({r}, {g}, {b})"), swatch);
+            }
+            Peek::Link(host) => self.toast("Link copied".into(), host, WATER),
+            Peek::Sum(answer) => {
+                let expr: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let expr = if expr.chars().count() > 16 { format!("{}…", expr.chars().take(15).collect::<String>()) } else { expr };
+                self.toast(expr, format!("= {answer}"), TASK);
+            }
+        }
+        true
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn start_pick(&mut self) {
+        self.picking = Some((0, 0, 0));
+    }
+
+    pub fn picking(&self) -> bool {
+        self.picking.is_some()
+    }
+
+    /// The cat's eyes and the pill show the colour under the cursor as it moves.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn pick_at(&mut self, (r, g, b): (u8, u8, u8)) {
+        if self.picking == Some((r, g, b)) && self.toast.is_some() {
+            return;
+        }
+        self.picking = Some((r, g, b));
+        let c = rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0);
+        self.mascot.tint = Some(c);
+        self.retoast(peek::rgb_hex(r, g, b), "Release to copy".into(), c);
+    }
+
+    /// Ends picking; returns the hex code to copy.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn finish_pick(&mut self) -> Option<String> {
+        let (r, g, b) = self.picking.take()?;
+        self.mascot.tint = None;
+        let hex = peek::rgb_hex(r, g, b);
+        self.retoast(hex.clone(), "Copied".into(), rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0));
+        Some(hex)
     }
 
     /// Polled often; returns true when the Caps Lock state changed.
@@ -516,6 +658,12 @@ impl App {
                 self.toast(title, detail, if net == Net::Online { WATER } else { FOCUS });
             }
             self.net = Some(net);
+            let capture = status::capture();
+            if let Some((title, detail)) = self.capture.as_ref().and_then(|old| status::capture_message(old, &capture)) {
+                self.toast(title, detail, if capture.cam.is_some() { CAM } else { MIC });
+            }
+            self.capture = Some(capture);
+            self.mascot.headset = self.capture_color();
         }
     }
 
@@ -563,12 +711,45 @@ impl App {
             self.anim = target;
             self.vel = 0.0;
         }
+        // Ends on the frame it finishes fading, not at the next 1 s tick.
+        if self.toast.as_ref().is_some_and(|t| now >= t.until) {
+            self.toast = None;
+        }
         if self.page_from.is_some_and(|(_, _, at)| at.elapsed().as_secs_f32() >= PAGE_SECS) {
             self.page_from = None;
         }
         if self.cat {
             self.mascot.step(now, dt);
         }
+        if self.grooving() {
+            if self.meter_at.is_none_or(|at| at.elapsed() > Duration::from_secs(10)) {
+                (self.meter, self.meter_at) = (media::Meter::open(), Some(now));
+            }
+            let peak = self.meter.as_ref().map_or(0.0, |m| m.peak());
+            if self.beat.step(peak, dt) && self.cat && !self.reduced_motion {
+                self.mascot.bob(now);
+            }
+        } else {
+            (self.beat.pulse, self.beat.level) = (0.0, 0.0);
+        }
+        let on = self.grooving() as u8 as f32;
+        // Quick to light up when a song starts, gentler going out.
+        self.lights = if on > self.lights { (self.lights + dt / 0.2).min(on) } else { (self.lights - dt / 0.4).max(on) };
+        if self.lights > 0.0 {
+            // Speed follows the music gently; brightness never does, so nothing pulses.
+            self.energy += (self.beat.level - self.energy) * (dt * 1.5).min(1.0);
+            let pace = if self.reduced_motion { 0.0 } else { 1.0 + 1.8 * self.energy.min(1.0) };
+            // Every light finishes a whole number of laps in 100 s, so wrapping there never jumps.
+            self.lights_t = (self.lights_t + dt * pace) % 100.0;
+        }
+        let away = self.mascot.away as u8 as f32;
+        self.stray_fade = if self.reduced_motion {
+            away
+        } else if away > self.stray_fade {
+            (self.stray_fade + dt / 0.45).min(away)
+        } else {
+            (self.stray_fade - dt / 0.35).max(away)
+        };
         // Critically damped like the open spring, but slower: the player has to glide across.
         let wide = self.lyrics_mode() as u8 as f32;
         if self.reduced_motion {
@@ -660,6 +841,79 @@ impl App {
             || (self.shown && self.pill_lyric().is_some_and(|l| l.is_empty()))
             || self.peek != self.shown as u8 as f32
             || self.peek_vel != 0.0
+            || self.grooving()
+            || self.toast_moving()
+            || self.lights != self.grooving() as u8 as f32
+            || self.stray_fade != self.mascot.away as u8 as f32
+            || self.picking.is_some()
+    }
+
+    /// Music playing behind the closed pill: the outline lights up from the first moment, toasts included.
+    fn grooving(&self) -> bool {
+        self.shown && self.anim == 0.0 && self.alert.is_none() && self.music_playing()
+    }
+
+    fn music_playing(&self) -> bool {
+        let Some(media) = &self.media else { return false };
+        media.shared.lock().is_ok_and(|s| s.track.as_ref().is_some_and(|t| t.playing))
+    }
+
+    /// Toast content opacity and vertical offset: rises in, then fades out just before it ends.
+    fn toast_fade(&self) -> (f32, f32) {
+        let Some(t) = &self.toast else { return (1.0, 0.0) };
+        let now = Instant::now();
+        let k = (now.saturating_duration_since(t.at).as_secs_f32() / TOAST_IN).min(1.0);
+        let k = 1.0 - (1.0 - k).powi(3);
+        let out = (t.until.saturating_duration_since(now).as_secs_f32() / TOAST_OUT).min(1.0);
+        let rise = if self.reduced_motion { 0.0 } else { 5.0 * (1.0 - k) };
+        (k.min(out), rise)
+    }
+
+    /// The toast is still fading in or out, so frames must keep coming.
+    fn toast_moving(&self) -> bool {
+        let now = Instant::now();
+        self.toast.as_ref().is_some_and(|t| {
+            now.saturating_duration_since(t.at).as_secs_f32() < TOAST_IN || t.until.saturating_duration_since(now).as_secs_f32() < TOAST_OUT + 0.05
+        })
+    }
+
+    /// How visible the outline lights are: eased in while music plays, out when it stops,
+    /// and gone once the panel opens.
+    fn glow(&self) -> f32 {
+        let k = self.lights;
+        k * k * (3.0 - 2.0 * k) * (1.0 - self.anim.clamp(0.0, 1.0))
+    }
+
+    /// Thin, soft white lights wander the outline both ways at their own speeds.
+    fn draw_lights(&self, p: &Painter, top: f32, g: f32) {
+        // (laps per second, direction, length in DIPs, start)
+        const LIGHTS: [(f32, f32, f32, f32); 4] = [(0.16, 1.0, 54.0, 0.0), (0.11, -1.0, 38.0, 0.3), (0.22, 1.0, 26.0, 0.62), (0.07, -1.0, 70.0, 0.85)];
+        const SEGS: usize = 16;
+        let (x, w, h) = self.panel();
+        let r = lerp(self.pill_size.1 / 2.0, 24.0, self.anim.clamp(0.0, 1.0));
+        // Centred on the 1 DIP border just outside the black shape.
+        let d = 0.5;
+        let len = outline_len(w, h, r, d, top);
+        // Lights fade at the outline's two ends, where it meets the screen edge.
+        let ends = |s: f32| (s.min(len - s) / 10.0).clamp(0.0, 1.0);
+        for (speed, dir, span, start) in LIGHTS {
+            // Each lap runs a light's length past the end, so it leaves fully before it comes round again.
+            let run = (start + self.lights_t * speed).fract() * (len + span);
+            let head = if dir > 0.0 { run } else { len - run };
+            for i in 0..SEGS {
+                let (f0, f1) = (i as f32 / SEGS as f32, (i + 1) as f32 / SEGS as f32);
+                let (s0, s1) = ((head - dir * span * f0).clamp(0.0, len), (head - dir * span * f1).clamp(0.0, len));
+                if (s0 - s1).abs() < 0.01 {
+                    continue;
+                }
+                // Soft at both ends, no bright head: just light sliding along the border.
+                let bell = (std::f32::consts::PI * (f0 + f1) / 2.0).sin();
+                let a = 0.8 * bell * bell * g * ends(s0);
+                let (x0, y0) = outline_at(x, w, h, r, d, top, s0);
+                let (x1, y1) = outline_at(x, w, h, r, d, top, s1);
+                p.line(x0, y0, x1, y1, Color { a, ..GLOW }, 1.0);
+            }
+        }
     }
 
     pub fn peek(&self) -> f32 {
@@ -708,13 +962,15 @@ impl App {
         let label = if self.pomo.running() { mmss(self.pomo.remaining(Instant::now())) } else { hhmm(clock().now) };
         let toast = self.toast.as_ref().map_or("", |t| t.title.as_str());
         let lyric = self.pill_lyric().unwrap_or_default();
-        format!("{label}|{toast}|{}|{:?}|{}|{}|{lyric}", self.water.taken, self.mascot.mood, self.cat, self.compact)
+        let rec = (self.capture.as_ref().map(|c| (c.mic.is_some(), c.cam.is_some())), self.mascot.grumpy, self.mascot.accessory);
+        format!("{label}|{toast}|{}|{:?}|{}|{}|{rec:?}|{lyric}", self.water.taken, self.mascot.mood, self.cat, self.compact)
     }
 
     /// Area the notch covers right now, shoulders included, for partial repaints.
     pub fn bounds(&self) -> Rect {
         let (x, w, h) = self.panel();
-        Rect::new(x - SHOULDER, 0.0, w + 2.0 * SHOULDER, h)
+        // Room for the beat swell, which grows the shape but not the layout.
+        Rect::new(x - SHOULDER - 3.0, 0.0, w + 2.0 * SHOULDER + 6.0, h + 2.0)
     }
 
     /// Cat head centre in canvas DIPs, used to aim its eyes at the cursor.
@@ -723,11 +979,11 @@ impl App {
         (x, y)
     }
 
-    /// The cat walks from the pill's left end to the panel's top-right corner as it opens.
+    /// The cat walks from the pill's left end to the panel's top-left corner as it opens.
     fn cat_place(&self) -> (f32, f32, f32) {
         let t = self.anim.clamp(0.0, 1.0);
         let pill_x = (CANVAS_W - self.pill_size.0) / 2.0 + 22.0;
-        let open_x = (CANVAS_W + self.open_w()) / 2.0 - 32.0;
+        let open_x = (CANVAS_W - self.open_w()) / 2.0 + 32.0;
         // A small swell mid-journey so it reads as a hop, not a slide.
         let s = 0.7 * (1.0 + 0.18 * (t * std::f32::consts::PI).sin());
         (lerp(pill_x, open_x, t), lerp(self.pill_size.1 / 2.0 + 2.0, 19.0, t), s)
@@ -779,6 +1035,10 @@ impl App {
             }
         }
         if let Some(next) = self.pomo.tick(Instant::now()) {
+            // A break starting means a Focus session just finished.
+            if next != Mode::Focus {
+                self.feed(Food::Focus);
+            }
             self.raise(Alert::Pomodoro(next));
         }
         if self.reset_armed.is_some_and(|t| t.elapsed() > Duration::from_secs(3)) {
@@ -793,6 +1053,13 @@ impl App {
                 self.raise(next);
             }
         }
+        let day = self.pet.day;
+        self.pet.update(c.day, c.minute);
+        if day != self.pet.day || self.ticks.is_multiple_of(600) {
+            self.save_pet();
+        }
+        self.mascot.grumpy = self.pet.grumpy();
+        self.mascot.accessory = self.pet.accessory();
         self.ticks = self.ticks.wrapping_add(1);
         self.poll_status();
         if self.toast.as_ref().is_some_and(|t| Instant::now() >= t.until) {
@@ -890,6 +1157,7 @@ impl App {
             Action::WaterChart => self.water_chart = !self.water_chart,
             Action::Sip => {
                 self.water.sip(c.hour);
+                self.feed(Food::Sip);
                 self.alert = None;
             }
             Action::Refill => {
@@ -928,7 +1196,11 @@ impl App {
             Action::TodoToggle(i) => {
                 if let Some(t) = self.todo.tasks.get_mut(i) {
                     t.done = !t.done;
+                    let done = t.done;
                     self.todo.save();
+                    if done {
+                        self.feed(Food::Task);
+                    }
                 }
             }
             Action::TodoDelete(i) => {
@@ -1007,8 +1279,21 @@ impl App {
         let radius = lerp(self.pill_size.1 / 2.0, 24.0, t);
         // Start above the screen edge so only the bottom corners look rounded.
         let shape = Rect::new(x, -radius, w, h + radius);
+        let g = self.glow();
+        let lit = g > 0.01;
+        if lit {
+            // The outline glows steadily white: a soft halo under a clear 1 DIP ring.
+            let c = GLOW;
+            let ring = |d: f32, a: f32| p.round(Rect::new(x - d, -radius, w + 2.0 * d, h + radius + d), radius + d, Color { a: a * g, ..c });
+            ring(3.0, 0.12);
+            ring(1.0, 0.5);
+        }
         p.round(shape, radius, BG);
-        p.shoulders(x, w, lerp(8.0, SHOULDER, t), BG);
+        let shoulder = lerp(8.0, SHOULDER, t);
+        p.shoulders(x, w, shoulder, BG);
+        if lit {
+            self.draw_lights(p, shoulder, g);
+        }
         let open_x = (CANVAS_W - self.open_w()) / 2.0;
         if t == 0.0 {
             // Clipped so text laid out for the final size stays inside while the pill resizes.
@@ -1035,15 +1320,24 @@ impl App {
         }
         // One cat for both states, drawn on top so it can travel between them.
         // Minimal mode keeps the pill catless, so there it only fades in with the panel.
-        if !self.compact || t > 0.6 {
+        let gone = self.stray_ease();
+        if (!self.compact || t > 0.6) && gone < 1.0 {
             let (cx, cy, s) = self.cat_place();
+            // Leaving, the cat lifts and shrinks a little as it fades; returning plays that backwards.
+            let fading = gone > 0.0;
+            if fading {
+                p.push_clip(Rect::new(0.0, 0.0, CANVAS_W, CANVAS_H), 0.0, 1.0 - gone);
+            }
             // The waving paw rises from below, so keep it inside the notch.
             let clip = self.cat && self.mascot.waving();
             if clip {
                 p.push_clip(shape, radius, 1.0);
             }
-            self.draw_cat(p, cx, cy, s);
+            self.draw_cat(p, cx, cy - 4.0 * gone, s * (1.0 - 0.25 * gone));
             if clip {
+                p.pop_clip();
+            }
+            if fading {
                 p.pop_clip();
             }
         }
@@ -1092,6 +1386,18 @@ impl App {
         rgba(up(fill.r), up(fill.g), up(fill.b), fill.a.max(1.0))
     }
 
+    /// Smoothstep of `stray_fade`: how far the cat has moved from the notch to its nap spot.
+    pub fn stray_ease(&self) -> f32 {
+        let f = self.stray_fade;
+        f * f * (3.0 - 2.0 * f)
+    }
+
+    /// The napping cat's own little window, away from the notch.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn draw_stray(&self, p: &Painter) {
+        self.mascot.draw_loaf(p, STRAY_W * 0.38, STRAY_H * 0.55, 1.0, Instant::now());
+    }
+
     fn draw_cat(&self, p: &Painter, cx: f32, cy: f32, s: f32) {
         if self.cat {
             self.mascot.draw(p, cx, cy, s, Instant::now());
@@ -1104,6 +1410,8 @@ impl App {
         } else {
             (hhmm(clock().now), TEXT)
         };
+        let (ta, dy) = self.toast_fade();
+        let fa = |c: Color| Color { a: c.a * ta, ..c };
         if let Some(t) = self.toast.as_ref().filter(|t| t.song) {
             // Cat, "title | artist" centred between, clock. Short of room, the title keeps the most.
             let side = 46f32.max(18.0 + p.measure(&label, Font::Body) + 10.0);
@@ -1114,18 +1422,29 @@ impl App {
             let sw = if aw > 0.0 { sw } else { 0.0 };
             let tw = tw.min(room - sw - aw);
             let sx = (CANVAS_W - tw - sw - aw) / 2.0;
-            p.text(&t.title, Rect::new(sx, 0.0, tw + 1.0, PILL_H), Font::Body, TEXT, Align::Left);
+            p.text(&t.title, Rect::new(sx, dy, tw + 1.0, PILL_H), Font::Body, fa(TEXT), Align::Left);
             if aw > 0.0 {
-                p.text(sep, Rect::new(sx + tw, 0.0, sw + 1.0, PILL_H), Font::Body, MUTED, Align::Left);
-                p.text(&t.detail, Rect::new(sx + tw + sw, 0.0, aw + 1.0, PILL_H), Font::Body, MUTED, Align::Left);
+                p.text(sep, Rect::new(sx + tw, dy, sw + 1.0, PILL_H), Font::Body, fa(MUTED), Align::Left);
+                p.text(&t.detail, Rect::new(sx + tw + sw, dy, aw + 1.0, PILL_H), Font::Body, fa(MUTED), Align::Left);
             }
             p.text(&label, Rect::new(x + 16.0, 0.0, w - 34.0, PILL_H), Font::Body, color, Align::Right);
             return;
         }
         if let Some(t) = &self.toast {
-            p.ellipse(x + 46.0, PILL_H / 2.0, 4.0, 4.0, t.color);
-            p.text(&t.title, Rect::new(x + 56.0, 0.0, 130.0, PILL_H), Font::Body, TEXT, Align::Left);
-            p.text(&t.detail, Rect::new(x + 190.0, 0.0, w - 206.0, PILL_H), Font::Small, MUTED, Align::Right);
+            // A copied colour's toast is titled with its hex code; its dot grows into a swatch.
+            // The dot pops in a beat ahead of the text.
+            let r = if t.title.starts_with('#') { 6.0 } else { 4.0 } * ta.sqrt();
+            p.ellipse(x + 46.0, PILL_H / 2.0, r, r, fa(t.color));
+            p.text(&t.title, Rect::new(x + 56.0, dy, 130.0, PILL_H), Font::Body, fa(TEXT), Align::Left);
+            // Laid out at the full toast width and pinned to the right edge, so the growing pill
+            // reveals the detail instead of squeezing it into an ellipsis.
+            // Clipped to the space right of the title, so while the pill is narrow it never overlaps.
+            let dw = self.pill_width() - 206.0;
+            if w > 206.0 {
+                p.push_clip(Rect::new(x + 190.0, 0.0, w - 206.0, PILL_H), 0.0, 1.0);
+                p.text(&t.detail, Rect::new(x + w - 16.0 - dw, dy, dw, PILL_H), Font::Small, fa(MUTED), Align::Right);
+                p.pop_clip();
+            }
             return;
         }
         let h = self.pill_size.1;
@@ -1133,6 +1452,12 @@ impl App {
         self.draw_pill_lyric(p, h);
         let align = if self.compact { Align::Center } else { Align::Right };
         p.text(&label, Rect::new(x + 16.0, 0.0, w - 34.0, h), Font::Body, color, align);
+    }
+
+    /// Headset mic glow while recording: camera wins when both are live.
+    fn capture_color(&self) -> Option<Color> {
+        let c = self.capture.as_ref()?;
+        if c.cam.is_some() { Some(CAM) } else { c.mic.as_ref().map(|_| MIC) }
     }
 
     /// The sung line rolls over like a karaoke screen: the old one lifts away quickly, the new one rises in.
@@ -1289,7 +1614,8 @@ impl App {
         let date = date_label();
         let time = hhmm(clock().now);
         let tw = p.measure(&time, Font::Body);
-        p.text(&time, Rect::new(x + 16.0, 8.0, tw + 1.0, 20.0), Font::Body, TEXT, Align::Left);
+        // Right side, like the closed pill; the cat takes the left.
+        p.text(&time, Rect::new(x + OPEN_W - 16.0 - tw - 1.0, 8.0, tw + 1.0, 20.0), Font::Body, TEXT, Align::Right);
         let battery = self.power.and_then(|pw| pw.percent.map(|pct| (pct, pw.plugged)));
         let bw = if battery.is_some() { 22.0 } else { 0.0 };
         let dw = p.measure(&date, Font::Small);
@@ -1880,9 +2206,60 @@ fn place_alert(current: &mut Option<Alert>, queued: &mut VecDeque<Alert>, alert:
     }
 }
 
+/// Length of the pill's visible outline pushed `d` outside it, from `top` down the left side,
+/// round the bottom and up the right side.
+fn outline_len(w: f32, h: f32, r: f32, d: f32, top: f32) -> f32 {
+    let side = (h - r - top).max(0.0);
+    2.0 * side + std::f32::consts::PI * (r + d) + (w - 2.0 * r).max(0.0)
+}
+
+/// The point `s` DIPs along that outline.
+fn outline_at(x: f32, w: f32, h: f32, r: f32, d: f32, top: f32, s: f32) -> (f32, f32) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let (cy, big) = (h - r, r + d);
+    let side = (cy - top).max(0.0);
+    let arc = FRAC_PI_2 * big;
+    let flat = (w - 2.0 * r).max(0.0);
+    let (lx, rx) = (x + r, x + w - r);
+    let mut s = s.max(0.0);
+    if s < side {
+        return (x - d, top + s);
+    }
+    s -= side;
+    if s < arc {
+        let a = PI - s / big;
+        return (lx + big * a.cos(), cy + big * a.sin());
+    }
+    s -= arc;
+    if s < flat {
+        return (lx + s, cy + big);
+    }
+    s -= flat;
+    if s < arc {
+        let a = FRAC_PI_2 - s / big;
+        return (rx + big * a.cos(), cy + big * a.sin());
+    }
+    s -= arc;
+    (x + w + d, cy - s.min(side))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outline_runs_down_round_and_back_up() {
+        let (x, w, h, r, d, top) = (100.0, 150.0, 30.0, 15.0, 0.0, 5.0);
+        let len = outline_len(w, h, r, d, top);
+        let near = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01;
+        assert!(near(outline_at(x, w, h, r, d, top, 0.0), (100.0, 5.0)), "starts top-left");
+        assert!(near(outline_at(x, w, h, r, d, top, len / 2.0), (175.0, 30.0)), "halfway is bottom centre");
+        assert!(near(outline_at(x, w, h, r, d, top, len), (250.0, 5.0)), "ends top-right");
+        // Evenly spaced samples stay evenly spaced: no jumps where the pieces meet.
+        let pts: Vec<_> = (0..=100).map(|i| outline_at(x, w, h, r, d, top, len * i as f32 / 100.0)).collect();
+        let step = len / 100.0;
+        assert!(pts.windows(2).all(|p| ((p[1].0 - p[0].0).hypot(p[1].1 - p[0].1) - step).abs() < 0.05));
+    }
 
     #[test]
     fn task_alerts_wait_instead_of_dropping() {

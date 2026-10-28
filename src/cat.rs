@@ -3,11 +3,12 @@
 //! and a startled, happy wake-up with a paw wave when you come back.
 //! While awake it fidgets every few seconds (glance, yawn, wink, ear flick, purr); asleep, its ear twitches.
 
+use crate::pet::Accessory;
 use crate::ui::{Align, Color, Font, Painter, Rect, rgba};
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 
-const EYE: Color = rgba(1.0, 0.76, 0.28, 1.0);
+const EYE: Color = rgba(0.99, 0.8, 0.45, 1.0);
 const PUPIL: Color = rgba(0.06, 0.03, 0.0, 1.0);
 const EAR: Color = rgba(0.16, 0.16, 0.17, 1.0);
 const EAR_IN: Color = rgba(0.62, 0.32, 0.4, 1.0);
@@ -21,6 +22,13 @@ const BEAN: Color = rgba(0.95, 0.55, 0.62, 1.0);
 const BLUSH: Color = rgba(1.0, 0.5, 0.62, 0.5);
 const MOUTH: Color = rgba(0.8, 0.42, 0.5, 1.0);
 const ZZZ: Color = rgba(0.62, 0.62, 0.66, 1.0);
+/// Grey so the headset shows on the black notch.
+const HEADSET: Color = rgba(0.36, 0.36, 0.39, 1.0);
+const BROW: Color = rgba(0.85, 0.85, 0.88, 1.0);
+const COLLAR: Color = rgba(0.85, 0.3, 0.36, 1.0);
+const BELL: Color = rgba(1.0, 0.82, 0.3, 1.0);
+// Teal, not red: at notch size a red band under the face reads as an open mouth.
+const SCARF: Color = rgba(0.3, 0.72, 0.82, 1.0);
 
 const IDLE_MS: u32 = 15_000;
 const DROWSY_SECS: f32 = 5.5;
@@ -28,6 +36,8 @@ const WAKING_SECS: f32 = 5.2;
 const STARTLE_SECS: f32 = 0.3;
 const SNORE_PERIOD: f32 = 4.0;
 const SNORE_SECS: f32 = 1.4;
+/// Asleep this long, the cat wanders off the notch to nap somewhere else.
+const STRAY_SECS: f32 = 90.0;
 const HEART: Color = rgba(1.0, 0.45, 0.58, 1.0);
 
 /// Short animations: the first five the cat plays on its own, the rest react to clicks.
@@ -103,6 +113,23 @@ pub struct Cat {
     next_trick: Instant,
     /// Where a reaction looks, as an eye offset like `look`.
     spot: (f32, f32),
+    /// Set while the mic or camera is in use: the cat wears a headset whose mic tip glows this colour.
+    pub headset: Option<Color>,
+    /// Last beat of the music, for a small head bob.
+    bob_at: Option<Instant>,
+    /// Eye colour while the colour picker samples the screen.
+    pub tint: Option<Color>,
+    /// Set where the platform can show the cat outside the notch.
+    pub can_stray: bool,
+    /// Napping away from the notch; any input brings it back.
+    pub away: bool,
+    /// The headset fades in and out over this, keeping the last tip colour while it goes.
+    headset_t: f32,
+    headset_c: Color,
+    /// Hungry: furrowed brows and no blush.
+    pub grumpy: bool,
+    /// Earned by good days in a row.
+    pub accessory: Accessory,
 }
 
 impl Cat {
@@ -116,6 +143,15 @@ impl Cat {
             look: (0.0, 0.0),
             pose: Pose { open: 1.0, eye: (0.0, 0.0), happy: 0.0, paw: 0.0, dilate: 0.0, yawn: 0.0 },
             trick: None,
+            headset: None,
+            bob_at: None,
+            tint: None,
+            can_stray: false,
+            away: false,
+            headset_t: 0.0,
+            headset_c: EYE,
+            grumpy: false,
+            accessory: Accessory::None,
             next_trick: now + Duration::from_secs(8),
             spot: (0.0, 0.0),
         }
@@ -142,6 +178,13 @@ impl Cat {
         self.trick.map(|(k, at)| (k, now.saturating_duration_since(at).as_secs_f32()))
     }
 
+    /// A quick nod on a beat of the music; only an awake cat feels it.
+    pub fn bob(&mut self, now: Instant) {
+        if self.mood == Mood::Awake {
+            self.bob_at = Some(now);
+        }
+    }
+
     /// Plays a reaction looking toward `spot`, cutting off any idle trick. A dozing cat ignores it;
     /// the same input wakes it through `poke`.
     pub fn react(&mut self, trick: Trick, spot: (f32, f32), now: Instant) {
@@ -160,10 +203,14 @@ impl Cat {
         if self.mood == Mood::Awake && idle_ms >= IDLE_MS && !panel_open {
             self.set(Mood::Drowsy, now);
         }
+        if self.can_stray && self.mood == Mood::Asleep && self.age(now) >= STRAY_SECS && !panel_open {
+            self.away = true;
+        }
     }
 
     /// Fresh input: a dozing cat startles awake and waves.
     pub fn poke(&mut self, now: Instant) {
+        self.away = false;
         if matches!(self.mood, Mood::Drowsy | Mood::Asleep) {
             self.set(Mood::Waking, now);
         }
@@ -217,6 +264,11 @@ impl Cat {
 
     /// Advances moods, blinks and the eased pose. Returns true while anything still moves.
     pub fn step(&mut self, now: Instant, dt: f32) -> bool {
+        if let Some(c) = self.headset {
+            self.headset_c = c;
+        }
+        let want = self.headset.is_some() as u8 as f32;
+        self.headset_t = if want > self.headset_t { (self.headset_t + dt / 0.3).min(want) } else { (self.headset_t - dt / 0.3).max(want) };
         let t = self.age(now);
         match self.mood {
             Mood::Drowsy if t >= DROWSY_SECS => self.set(Mood::Asleep, now),
@@ -275,6 +327,7 @@ impl Cat {
             || off(p.dilate, to.dilate)
             || off(p.yawn, to.yawn);
         unsettled
+            || self.headset_t != self.headset.is_some() as u8 as f32
             || self.trick.is_some()
             || (self.can_trick() && now >= self.next_trick)
             || self.blink_at.is_some()
@@ -283,9 +336,23 @@ impl Cat {
             || (self.mood == Mood::Asleep && self.age(now) % SNORE_PERIOD < SNORE_SECS)
     }
 
+    /// The whole cat curled up as a loaf, for napping away from the notch: off the black notch
+    /// its face needs a black head and body behind it, with a soft rim to stand out on dark taskbars.
+    pub fn draw_loaf(&self, p: &Painter, cx: f32, cy: f32, s: f32, now: Instant) {
+        let (bx, by) = (cx + 6.0 * s, cy + 6.5 * s);
+        p.ellipse(bx, by, 19.0 * s, 8.5 * s, PAW);
+        p.arc(bx, by, 18.6 * s, 180.0, 180.0, PAW_RIM, 0.7 * s);
+        // The tail wraps around the front of the loaf.
+        p.arc(bx + 4.0 * s, by + 2.0 * s, 9.0 * s, 20.0, 120.0, PAW_RIM, 1.6 * s);
+        p.ellipse(cx, cy + 1.0 * s, 13.0 * s, 10.5 * s, PAW);
+        p.arc(cx, cy + 1.0 * s, 12.7 * s, 200.0, 140.0, PAW_RIM, 0.7 * s);
+        self.draw(p, cx, cy, s, now);
+    }
+
     /// Draws the cat centred on (cx, cy); `s` scales it (1.0 is about 31 DIP wide).
     pub fn draw(&self, p: &Painter, cx: f32, cy: f32, s: f32, now: Instant) {
         let Pose { open, eye: (lx, ly), happy, paw, dilate, yawn } = self.pose;
+        let eye_c = self.tint.unwrap_or(EYE);
         let trick = self.trick(now);
         // Hops and bobs lift the whole head.
         let hop = match trick {
@@ -294,7 +361,11 @@ impl Cat {
             Some((Trick::Groove, k)) if k < 2.7 => (k * PI * 2.4).sin().abs() * 1.5,
             _ => 0.0,
         };
-        let cy = cy - hop * s;
+        let bob = self.bob_at.map_or(0.0, |at| {
+            let k = now.saturating_duration_since(at).as_secs_f32() / 0.2;
+            if k < 1.0 { (k * PI).sin() * 1.2 } else { 0.0 }
+        });
+        let cy = cy - (hop + bob) * s;
         // One ear flicks back and springs up; one eye closes for a wink.
         let flick = match trick {
             Some((Trick::EarFlick, k)) => (k / Trick::EarFlick.secs() * PI * 2.0).sin().max(0.0) * 3.0 * s,
@@ -312,31 +383,37 @@ impl Cat {
         // Ears perk up when startled and fold down in sleep; they lean a little with the gaze.
         let lift = ((open - 1.0) * 10.0).clamp(-2.0, 1.5) * s;
         let lean = lx * 0.3 * s;
+        // The headset band sits behind the ears.
+        let hk = self.headset_t * self.headset_t * (3.0 - 2.0 * self.headset_t);
+        let gear = alpha(HEADSET, hk);
+        if hk > 0.01 {
+            p.arc(cx + lean, cy + 2.0 * s, 10.5 * s, 200.0, 140.0, gear, 1.4 * s);
+        }
         for side in [-1.0f32, 1.0] {
             let x = |d: f32| cx + side * d * s + lean;
             let (tx, ty) = if side > 0.0 { (flick, flick) } else { (0.0, 0.0) };
-            p.triangle([(x(3.5), cy - 7.0 * s), (x(15.0), cy - 3.5 * s), (x(12.0) + tx, cy - 13.0 * s - lift + ty)], EAR);
-            p.triangle([(x(6.5), cy - 7.0 * s), (x(13.0), cy - 5.0 * s), (x(11.5) + tx, cy - 11.0 * s - lift + ty)], EAR_IN);
-            // A rounded tip instead of a sharp point.
-            p.ellipse(x(12.0) + tx, cy - 12.6 * s - lift + ty, 0.9 * s, 0.9 * s, EAR);
+            p.triangle([(x(3.5), cy - 7.0 * s), (x(14.5), cy - 3.5 * s), (x(11.5) + tx, cy - 12.0 * s - lift + ty)], EAR);
+            p.triangle([(x(6.5), cy - 6.8 * s), (x(12.6), cy - 4.9 * s), (x(11.0) + tx, cy - 10.0 * s - lift + ty)], EAR_IN);
+            // A soft, round tip, kitten-style.
+            p.ellipse(x(11.4) + tx, cy - 11.2 * s - lift + ty, 1.5 * s, 1.5 * s, EAR);
         }
 
         let glow = open.min(1.0) * 0.65 + 0.35;
         let seen = 1.0 - happy;
         for side in [-1.0f32, 1.0] {
             // Set low and a little apart, kitten-style.
-            let (ex, ey) = (cx + (side * 6.5 + lx * 0.8) * s, cy + (0.8 + ly) * s);
+            let (ex, ey) = (cx + (side * 6.0 + lx * 0.8) * s, cy + (0.8 + ly) * s);
             // Big, round kitten eyes.
             let w = 2.9 * s;
             let h = (open * 3.3 * blink * if side > 0.0 { wink } else { 1.0 }).max(0.7) * s;
             if seen > 0.01 {
-                p.ellipse(ex, ey, w * 2.0, 1.4 * s + h * 1.4, alpha(EYE, 0.10 * glow * seen));
-                p.ellipse(ex, ey, w * 1.45, 0.7 * s + h * 1.2, alpha(EYE, 0.16 * glow * seen));
+                p.ellipse(ex, ey, w * 2.0, 1.4 * s + h * 1.4, alpha(eye_c, 0.05 * glow * seen));
+                p.ellipse(ex, ey, w * 1.45, 0.7 * s + h * 1.2, alpha(eye_c, 0.09 * glow * seen));
                 if open < 0.3 {
                     // Asleep: a contented closed curve.
-                    p.arc(ex, ey - 1.2 * s, 2.4 * s, 25.0, 130.0, alpha(EYE, seen), 1.1 * s);
+                    p.arc(ex, ey - 1.2 * s, 2.4 * s, 25.0, 130.0, alpha(eye_c, seen), 1.1 * s);
                 } else {
-                    p.ellipse(ex, ey, w, h, alpha(EYE, seen));
+                    p.ellipse(ex, ey, w, h, alpha(eye_c, seen));
                     if h > 1.4 * s {
                         let px = ex + lx * 0.3 * s;
                         let pw = (1.9 + 0.5 * dilate) * s;
@@ -348,17 +425,24 @@ impl Cat {
                 }
             }
             if happy > 0.01 {
-                p.arc(ex, ey + 1.6 * s, 2.4 * s, 205.0, 130.0, alpha(EYE, happy), 1.3 * s);
+                p.arc(ex, ey + 1.6 * s, 2.4 * s, 205.0, 130.0, alpha(eye_c, happy), 1.3 * s);
+            }
+            if self.grumpy && open > 0.3 {
+                // Brows slanting down toward the nose.
+                p.line(ex + side * 3.0 * s, ey - 4.6 * s, ex - side * 1.2 * s, ey - 3.5 * s, BROW, 1.1 * s);
             }
         }
 
         let (nx, ny) = (cx + lx * 0.5 * s, cy + (4.4 + ly * 0.5) * s);
         for side in [-1.0f32, 1.0] {
+            if self.grumpy {
+                break;
+            }
             // Just below and outside the eyes, so they stay clear at notch size.
             p.ellipse(cx + side * 9.6 * s + lx * 0.6 * s, cy + (5.4 + ly * 0.5) * s, 2.1 * s, 1.2 * s, BLUSH);
         }
         // A soft rounded nose rather than a sharp wedge.
-        p.ellipse(nx, ny + 0.35 * s, 1.15 * s, 0.75 * s, NOSE);
+        p.ellipse(nx, ny + 0.35 * s, 0.95 * s, 0.62 * s, NOSE);
         if yawn > 0.05 {
             // A round, open yawn in place of the ω.
             p.ellipse(nx, ny + 2.2 * s, 1.4 * s * yawn, 1.9 * s * yawn, MOUTH);
@@ -371,8 +455,35 @@ impl Cat {
         }
         for side in [-1.0f32, 1.0] {
             let x0 = nx + side * 4.0 * s;
-            p.line(x0, ny + 0.6 * s, x0 + side * 6.5 * s, ny - 0.2 * s, WHISKER, 0.5 * s);
-            p.line(x0, ny + 1.5 * s, x0 + side * 6.5 * s, ny + 2.2 * s, WHISKER, 0.5 * s);
+            p.line(x0, ny + 0.6 * s, x0 + side * 5.0 * s, ny - 0.1 * s, WHISKER, 0.5 * s);
+            p.line(x0, ny + 1.5 * s, x0 + side * 5.0 * s, ny + 2.1 * s, WHISKER, 0.5 * s);
+        }
+        match self.accessory {
+            Accessory::None => {}
+            Accessory::Bell => {
+                p.arc(cx + lean, cy - 1.0 * s, 10.0 * s, 60.0, 60.0, COLLAR, 1.0 * s);
+                p.ellipse(cx + lean, cy + 9.9 * s, 1.6 * s, 1.6 * s, BELL);
+                p.line(cx + lean - 0.7 * s, cy + 10.4 * s, cx + lean + 0.7 * s, cy + 10.4 * s, PUPIL, 0.4 * s);
+            }
+            Accessory::Scarf => {
+                p.arc(cx + lean, cy - 4.0 * s, 13.5 * s, 62.0, 56.0, SCARF, 1.9 * s);
+                let (tx, ty) = (cx + lean + 4.5 * s, cy + 9.0 * s);
+                p.triangle([(tx - 1.2 * s, ty), (tx + 1.4 * s, ty), (tx + 0.8 * s, ty + 4.0 * s)], SCARF);
+            }
+        }
+        if hk > 0.01 {
+            let tip = alpha(self.headset_c, hk);
+            // Ear cups at the band's ends, and a mic boom curving from the right cup towards the mouth.
+            for side in [-1.0f32, 1.0] {
+                p.ellipse(cx + lean + side * 9.9 * s, cy - 0.6 * s, 1.6 * s, 2.3 * s, gear);
+            }
+            let (bx, by) = (cx + lean + 9.9 * s, cy + 1.2 * s);
+            let (mx, my) = (bx - 1.0 * s, by + 4.2 * s);
+            let (tx, ty) = (nx + 5.6 * s, ny + 2.4 * s);
+            p.line(bx, by, mx, my, gear, 0.9 * s);
+            p.line(mx, my, tx, ty, gear, 0.9 * s);
+            p.ellipse(tx, ty, 2.0 * s, 2.0 * s, alpha(tip, 0.25));
+            p.ellipse(tx, ty, 1.0 * s, 1.0 * s, tip);
         }
 
         let t = self.age(now);
@@ -445,6 +556,50 @@ mod tests {
         assert_eq!(cat.mood, Mood::Awake);
         cat.poke(at(t0, 13.0));
         assert_eq!(cat.mood, Mood::Awake, "poking an awake cat changes nothing");
+    }
+
+    #[test]
+    fn strays_after_a_long_nap_and_comes_back_on_input() {
+        let t0 = Instant::now();
+        let mut cat = Cat::new(t0);
+        cat.can_stray = true;
+        cat.idle(15_000, false, t0);
+        cat.step(at(t0, 5.6), 0.016);
+        assert_eq!(cat.mood, Mood::Asleep);
+        cat.idle(30_000, false, at(t0, 60.0));
+        assert!(!cat.away, "still napping in the notch");
+        cat.idle(30_000, true, at(t0, 100.0));
+        assert!(!cat.away, "an open panel keeps it home");
+        cat.idle(30_000, false, at(t0, 100.0));
+        assert!(cat.away);
+        cat.poke(at(t0, 101.0));
+        assert!(!cat.away);
+        assert_eq!(cat.mood, Mood::Waking);
+    }
+
+    #[test]
+    fn headset_fades_in_and_out_over_a_third_of_a_second() {
+        let t0 = Instant::now();
+        let mut cat = Cat::new(t0);
+        cat.headset = Some(EYE);
+        cat.step(t0, 0.15);
+        assert!(cat.headset_t > 0.4 && cat.headset_t < 0.6);
+        assert!(cat.busy(t0), "frames keep coming mid-fade");
+        cat.step(t0, 0.2);
+        assert_eq!(cat.headset_t, 1.0);
+        cat.headset = None;
+        cat.step(t0, 0.3);
+        assert_eq!(cat.headset_t, 0.0);
+    }
+
+    #[test]
+    fn never_strays_where_it_cannot_be_shown() {
+        let t0 = Instant::now();
+        let mut cat = Cat::new(t0);
+        cat.idle(15_000, false, t0);
+        cat.step(at(t0, 5.6), 0.016);
+        cat.idle(30_000, false, at(t0, 200.0));
+        assert!(!cat.away);
     }
 
     #[test]
