@@ -1,5 +1,5 @@
 ; Builds dist\PurrchSetup.exe: cargo build --release, then iscc installer.iss
-#define Version "1.0.3"
+#define Version "1.1.0"
 
 [Setup]
 AppId={{6B1F7C2E-4D3A-4C1B-9E2F-50A7C1D8B3E4}
