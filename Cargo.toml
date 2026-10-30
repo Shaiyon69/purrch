@@ -5,12 +5,15 @@ edition = "2024"
 description = "A cat that lives in your notch. Water reminders, focus timer, to-dos, music and a file shelf for Windows and Linux."
 license = "MIT"
 
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde_json = "1"
+
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.58"
 windows = { version = "0.58", features = [
     "implement",
     "Foundation",
-    "Data_Json",
     "Devices_Bluetooth",
     "Devices_Enumeration",
     "Win32_Devices_FunctionDiscovery",
@@ -19,8 +22,6 @@ windows = { version = "0.58", features = [
     "Media_Control",
     "Networking_Connectivity",
     "Storage_Streams",
-    "Web_Http",
-    "Web_Http_Headers",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Graphics_Gdi",
@@ -65,7 +66,6 @@ gtk4-layer-shell = "0.6"
 x11rb = { version = "0.13", features = ["screensaver"] }
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
 ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
-serde_json = "1"
 libc = "0.2"
 
 [build-dependencies]
