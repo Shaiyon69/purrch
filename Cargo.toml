@@ -1,6 +1,6 @@
 [package]
 name = "purrch"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 description = "A cat that lives in your notch. Water reminders, focus timer, to-dos, music and a file shelf for Windows and Linux."
 license = "MIT"
