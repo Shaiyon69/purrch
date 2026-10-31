@@ -1,7 +1,9 @@
 name: Release
 
-# Pushing a v* tag builds the Windows installer and the Linux AppImage and publishes both
-# on one GitHub release. Run it by hand with a tag to (re)build an existing release.
+# Pushing a v* tag builds the Windows installer and the Linux AppImage and publishes both as the
+# purrch-v* release on Shaiyon69/Skibidevs: binaries ship only from the website, never from this repo.
+# Run it by hand with a tag to (re)build an existing release.
+# SKIBIDEVS_TOKEN: fine-grained token with Contents read/write on Shaiyon69/Skibidevs only.
 on:
   push:
     tags: ["v*"]
@@ -12,7 +14,7 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
@@ -60,13 +62,16 @@ jobs:
           merge-multiple: true
 
       # A release written by hand keeps its notes; the builds replace any old assets.
-      - name: Publish release
+      - name: Publish Skibidevs release
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.SKIBIDEVS_TOKEN }}
+          GH_REPO: Shaiyon69/Skibidevs
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" assets/* --clobber
+          test -n "$GH_TOKEN" || { echo "::error::Set the SKIBIDEVS_TOKEN secret"; exit 1; }
+          if gh release view "purrch-$TAG" >/dev/null 2>&1; then
+            gh release upload "purrch-$TAG" assets/* --clobber
           else
-            gh release create "$TAG" assets/* --title "Purrch ${TAG#v}" --generate-notes
+            gh release create "purrch-$TAG" assets/* --title "Purrch ${TAG#v}" --notes "Changes: https://github.com/Shaiyon69/purrch/commits/$TAG"
           fi
+          # The site refreshes its download list on this event.
+          gh api "repos/$GH_REPO/dispatches" -f event_type=app-released
