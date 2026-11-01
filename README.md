@@ -7,7 +7,7 @@
 <p align="center">A cat that lives in your notch.</p>
 
 <p align="center">
-  <a href="https://github.com/Shaiyon69/purrch/releases/latest"><img src="https://img.shields.io/github/v/release/Shaiyon69/purrch" alt="Latest release"></a>
+  <a href="https://shaiyon69.github.io/Skibidevs/apptic/?app=purrch"><img src="https://img.shields.io/github/v/release/Shaiyon69/Skibidevs?filter=purrch-*&label=release" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Shaiyon69/purrch" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0078D4" alt="Windows | Linux">
 </p>
@@ -40,7 +40,7 @@ Right-click the tray icon for *Start with Windows* (*Start on login* on Linux), 
 
 ## Install
 
-Download `PurrchSetup.exe` from the [latest release](https://github.com/Shaiyon69/purrch/releases/latest) and run it. It installs for your user only, with no admin prompt, and adds Purrch to the Start menu. Windows 10 or 11, 64-bit.
+Download `PurrchSetup.exe` from [Skibidevs](https://shaiyon69.github.io/Skibidevs/apptic/?app=purrch) and run it. It installs for your user only, with no admin prompt, and adds Purrch to the Start menu. Windows 10 or 11, 64-bit.
 
 > [!NOTE]
 > The installer is not code-signed yet, so Windows SmartScreen may warn you. Click *More info*, then *Run anyway*.
