@@ -95,7 +95,7 @@ Everything stays on your machine, as plain text in `%APPDATA%\Purrch\` (Linux: `
 | `water.txt` | bottle, goal, hours and today's progress |
 | `todo.txt` | tasks, one per line |
 | `shelf.txt` | paths of shelved items |
-| `pet.txt` | how fed the cat is and its good-day streak |
+| `pet.txt` | how fed the cat is |
 
 Dropped links, text snippets and caught screenshots are saved as files in `%LOCALAPPDATA%\Purrch\Shelf\` (Linux: `~/.local/share/purrch/shelf/`).
 

@@ -416,17 +416,10 @@ impl App {
 
     /// Feeds the cat; a sip or Focus session gets a purr (a finished task already cheers).
     fn feed(&mut self, food: Food) {
-        let good = self.pet.feed(food);
+        self.pet.feed(food);
         self.save_pet();
         if self.cat && food != Food::Task {
             self.mascot.react(cat::Trick::Purr, (0.0, 0.0), Instant::now());
-        }
-        if good {
-            let gift = match self.pet.accessory() {
-                pet::Accessory::Scarf => "a scarf",
-                _ => "a bell",
-            };
-            self.toast("Good day!".into(), format!("The cat earned {gift}"), TASK);
         }
     }
 
@@ -962,7 +955,7 @@ impl App {
         let label = if self.pomo.running() { mmss(self.pomo.remaining(Instant::now())) } else { hhmm(clock().now) };
         let toast = self.toast.as_ref().map_or("", |t| t.title.as_str());
         let lyric = self.pill_lyric().unwrap_or_default();
-        let rec = (self.capture.as_ref().map(|c| (c.mic.is_some(), c.cam.is_some())), self.mascot.grumpy, self.mascot.accessory);
+        let rec = (self.capture.as_ref().map(|c| (c.mic.is_some(), c.cam.is_some())), self.mascot.grumpy);
         format!("{label}|{toast}|{}|{:?}|{}|{}|{rec:?}|{lyric}", self.water.taken, self.mascot.mood, self.cat, self.compact)
     }
 
@@ -1059,7 +1052,6 @@ impl App {
             self.save_pet();
         }
         self.mascot.grumpy = self.pet.grumpy();
-        self.mascot.accessory = self.pet.accessory();
         self.ticks = self.ticks.wrapping_add(1);
         self.poll_status();
         if self.toast.as_ref().is_some_and(|t| Instant::now() >= t.until) {
