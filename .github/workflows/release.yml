@@ -22,6 +22,7 @@ env:
 jobs:
   linux:
     uses: ./.github/workflows/linux.yml
+    secrets: inherit
     with:
       ref: ${{ inputs.tag || github.ref }}
 
