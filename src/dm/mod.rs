@@ -67,10 +67,6 @@ pub fn preview(text: &str) -> String {
     }
 }
 
-pub fn sender_name(display_name: Option<&str>, username: &str) -> String {
-    display_name.map(str::trim).filter(|d| !d.is_empty()).unwrap_or(username).into()
-}
-
 /// `(message id, room)` for an INSERT in a DM room from someone else.
 pub fn wanted(payload: &serde_json::Value, me: &str) -> Option<(String, String)> {
     if payload["type"] != "INSERT" || payload["profile_id"].as_str()? == me {
@@ -123,12 +119,6 @@ mod tests {
         assert!(p.ends_with('…'));
         assert_eq!(preview("  hi "), "hi");
         assert_eq!(preview(""), "Sent an attachment");
-    }
-
-    #[test]
-    fn sender_name_falls_back() {
-        assert_eq!(sender_name(Some("  "), "bob_1"), "bob_1");
-        assert_eq!(sender_name(Some("Bob"), "bob_1"), "Bob");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The DM worker: links via the keyring, keeps the session fresh and saved,
 //! listens on the user's private realtime topic, and sends replies.
 
-use super::{DmEvent, LinkEntry, Note, SavedSession, decrypt, preview, reply_row, sender_name, wanted};
+use super::{DmEvent, LinkEntry, Note, SavedSession, decrypt, preview, reply_row, wanted};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use shaiyon_crypto::Jwk;
@@ -269,8 +269,7 @@ impl Worker {
     }
 
     async fn fetch(&self, client: &Client, saved: &mut SavedSession, tokens: &watch::Sender<String>, keys: &E2eeKeys, id: &str, room: String) -> Result<(), Fail> {
-        let query = format!("id=eq.{id}&select=content,is_encrypted,profile_id,dm_room_id,profiles(username,display_name,public_key)");
-        let rows = client.select::<Value>("messages", &query).await;
+        let rows = client.select::<Value>("messages", &message_query(id)).await;
         self.sync(client, saved, tokens).await?;
         // A failed or empty fetch drops this one alert; nothing to retry.
         let Some(row) = rows.ok().and_then(|r| r.into_iter().next()) else { return Ok(()) };
@@ -300,6 +299,11 @@ fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
+/// `messages` reaches `profiles` through three foreign keys, so the embed must name one.
+fn message_query(id: &str) -> String {
+    format!("id=eq.{id}&select=content,is_encrypted,profile_id,dm_room_id,profiles!fk_messages_profile(username,public_key)")
+}
+
 fn dm_event(row: &Value, keys: &E2eeKeys, room: String) -> DmEvent {
     let p = &row["profiles"];
     // `public_key` is a JWK serialized as a JSON string.
@@ -312,7 +316,7 @@ fn dm_event(row: &Value, keys: &E2eeKeys, room: String) -> DmEvent {
     };
     DmEvent {
         room,
-        sender: sender_name(p["display_name"].as_str(), p["username"].as_str().unwrap_or_default()),
+        sender: p["username"].as_str().unwrap_or_default().into(),
         preview: text.map(|t| preview(&t)),
         peer_public,
     }
@@ -384,10 +388,18 @@ mod tests {
     }
 
     #[test]
+    fn message_query_names_the_sender_fk() {
+        assert_eq!(
+            message_query("m1"),
+            "id=eq.m1&select=content,is_encrypted,profile_id,dm_room_id,profiles!fk_messages_profile(username,public_key)"
+        );
+    }
+
+    #[test]
     fn dm_event_reads_row() {
         let (alice, bob) = (shaiyon_crypto::generate_keypair(), shaiyon_crypto::generate_keypair());
         let sent = reply_row("a", "r1", &alice, &bob.public(), "hey").unwrap();
-        let profiles = json!({"username": "alice_1", "display_name": null, "public_key": serde_json::to_string(&alice.public()).unwrap()});
+        let profiles = json!({"username": "alice_1", "public_key": serde_json::to_string(&alice.public()).unwrap()});
         let row = json!({"content": sent["content"], "is_encrypted": true, "profiles": profiles});
         let keys = E2eeKeys { private: Some(bob), public: None, legacy: vec![] };
         let ev = dm_event(&row, &keys, "r1".into());
