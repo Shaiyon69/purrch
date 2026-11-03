@@ -21,6 +21,14 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SKIBI_CORE_SSH_KEY }}
+
+      - name: Fetch private shaiyon-core over SSH
+        shell: bash
+        run: git config --global url."git@github.com:Shaiyon69/shaiyon-core".insteadOf "https://github.com/Shaiyon69/shaiyon-core"
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
