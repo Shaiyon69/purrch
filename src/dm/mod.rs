@@ -1,5 +1,7 @@
 //! Pure DM logic: no I/O. The network worker and UI build on this.
 
+mod worker;
+
 use serde::{Deserialize, Serialize};
 use shaiyon_crypto::{Envelope, Jwk};
 
