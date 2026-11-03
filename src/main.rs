@@ -4,6 +4,9 @@ mod app;
 mod beat;
 mod bluetooth;
 mod cat;
+// Later DM tasks (worker, UI) use these items; silence dead-code until then.
+#[allow(dead_code)]
+mod dm;
 mod lyrics;
 mod media;
 mod peek;
