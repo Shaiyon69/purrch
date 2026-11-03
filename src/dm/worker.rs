@@ -318,7 +318,8 @@ fn dm_event(row: &Value, keys: &E2eeKeys, room: String) -> DmEvent {
         room,
         sender: p["username"].as_str().unwrap_or_default().into(),
         preview: text.map(|t| preview(&t)),
-        peer_public,
+        // No private key means no reply box, even for a plain-text message.
+        peer_public: peer_public.filter(|_| keys.private.is_some()),
     }
 }
 
@@ -410,5 +411,20 @@ mod tests {
         let row = json!({"content": "x", "is_encrypted": true, "profiles": {"username": "b", "public_key": "not a jwk"}});
         let ev = dm_event(&row, &E2eeKeys::default(), "r1".into());
         assert_eq!((ev.preview, ev.peer_public), (None, None));
+    }
+
+    #[test]
+    fn plain_dm_offers_reply_only_with_a_private_key() {
+        let alice = shaiyon_crypto::generate_keypair();
+        let row = json!({"content": "hi", "is_encrypted": false,
+            "profiles": {"username": "alice_1", "public_key": serde_json::to_string(&alice.public()).unwrap()}});
+        let keys = E2eeKeys { private: Some(shaiyon_crypto::generate_keypair()), public: None, legacy: vec![] };
+        let ev = dm_event(&row, &keys, "r1".into());
+        assert_eq!(ev.preview.as_deref(), Some("hi"));
+        assert_eq!(ev.peer_public, Some(alice.public()));
+
+        let ev = dm_event(&row, &E2eeKeys::default(), "r1".into());
+        assert_eq!(ev.preview.as_deref(), Some("hi"));
+        assert_eq!(ev.peer_public, None);
     }
 }
