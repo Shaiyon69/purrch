@@ -57,11 +57,10 @@ pub fn sender_name(display_name: Option<&str>, username: &str) -> String {
 
 /// `(message id, room)` for an INSERT in a DM room from someone else.
 pub fn wanted(payload: &serde_json::Value, me: &str) -> Option<(String, String)> {
-    let rec = &payload["record"];
-    if payload["type"] != "INSERT" || rec["profile_id"].as_str()? == me {
+    if payload["type"] != "INSERT" || payload["profile_id"].as_str()? == me {
         return None;
     }
-    Some((rec["id"].as_str()?.into(), rec["dm_room_id"].as_str()?.into()))
+    Some((payload["id"].as_str()?.into(), payload["dm_room_id"].as_str()?.into()))
 }
 
 pub fn reply_row(me: &str, room: &str, own: &Jwk, peer_public: &Jwk, text: &str) -> Result<serde_json::Value, String> {
@@ -119,7 +118,8 @@ mod tests {
     #[test]
     fn wanted_filters_events() {
         let ev = |t: &str, room: serde_json::Value, who: &str| {
-            json!({"type": t, "record": {"id": "m1", "dm_room_id": room, "profile_id": who}})
+            json!({"type": t, "id": "m1", "profile_id": who, "created_at": "2026-11-03T00:00:00Z",
+                "dm_room_id": room, "channel_id": null, "thread_root_id": null})
         };
         assert_eq!(wanted(&ev("INSERT", json!("r1"), "me"), "me"), None);
         assert_eq!(wanted(&ev("UPDATE", json!("r1"), "bob"), "me"), None);
