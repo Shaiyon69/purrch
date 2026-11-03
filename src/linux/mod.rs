@@ -7,7 +7,7 @@ pub mod x11;
 
 use crate::app::{self, App};
 use crate::ui::{Painter, Rect};
-use crate::{bluetooth, cat, media, shelf, status};
+use crate::{bluetooth, cat, dm, media, shelf, status};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -45,6 +45,8 @@ struct State {
     peeked: bool,
     away_since: Option<Instant>,
     tray: Option<ksni::blocking::Handle<tray::Tray>>,
+    /// The link state the tray menu was last built with.
+    tray_linked: bool,
     /// When the cursor last moved over the notch, for idle time when the system won't say.
     last_seen: Instant,
 }
@@ -309,6 +311,9 @@ fn on_drag(event: shelf::DragEvent) {
 
 fn on_tray(cmd: tray::Command) {
     match cmd {
+        tray::Command::Unlink => {
+            with_state(|s| s.app.send_dm(dm::worker::Cmd::Unlink));
+        }
         tray::Command::Autostart => tray::set_autostart(!tray::autostart_enabled()),
         tray::Command::About => tray::about(),
         tray::Command::Quit => {
@@ -601,7 +606,7 @@ fn build(application: &gtk::Application) {
         if !w.is_active() {
             with_state(|s| {
                 if s.app.editing.is_some() {
-                    s.app.finish_edit(true);
+                    s.app.blur();
                     s.start_anim();
                     s.render();
                 }
@@ -615,6 +620,13 @@ fn build(application: &gtk::Application) {
             s.app.on_media();
             s.start_anim();
             s.refresh();
+        })
+    }));
+    app.dm = Some(dm::worker::start(|| {
+        on_main(|s| {
+            s.app.on_dm();
+            s.start_anim();
+            s.render();
         })
     }));
     let bluetooth = bluetooth::start(|| {
@@ -646,6 +658,7 @@ fn build(application: &gtk::Application) {
         peeked: false,
         away_since: None,
         tray,
+        tray_linked: false,
         last_seen: Instant::now(),
     };
     STATE.with(|s| *s.borrow_mut() = Some(state));
@@ -654,6 +667,16 @@ fn build(application: &gtk::Application) {
 
     glib::timeout_add_local(Duration::from_secs(1), || {
         with_state(State::tick);
+        // ksni caches the menu, so rebuild it when the link state flips.
+        with_state(|s| {
+            let linked = s.app.dm_linked();
+            if linked != s.tray_linked {
+                s.tray_linked = linked;
+                if let Some(handle) = &s.tray {
+                    handle.update(|t| t.linked = linked);
+                }
+            }
+        });
         glib::ControlFlow::Continue
     });
     glib::timeout_add_local(Duration::from_millis(120), || {

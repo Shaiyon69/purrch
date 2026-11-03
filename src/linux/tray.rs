@@ -13,11 +13,14 @@ pub enum Command {
     Compact,
     About,
     Quit,
+    Unlink,
 }
 
 pub struct Tray {
     pub cat: bool,
     pub compact: bool,
+    /// Messapp is linked: the menu offers to unlink it.
+    pub linked: bool,
     icon: Vec<ksni::Icon>,
     on: fn(Command),
 }
@@ -48,14 +51,16 @@ impl ksni::Tray for Tray {
             CheckmarkItem { label: label.into(), checked, activate: Box::new(move |t: &mut Tray| t.post(cmd)), ..Default::default() }.into()
         };
         let item = |label: &str, cmd: Command| StandardItem { label: label.into(), activate: Box::new(move |t: &mut Tray| t.post(cmd)), ..Default::default() }.into();
-        vec![
+        let mut items = vec![
             check("Start on login", autostart_enabled(), Command::Autostart),
             check("Show the cat", self.cat, Command::Cat),
             check("Compact notch", self.compact, Command::Compact),
-            ksni::MenuItem::Separator,
-            item("About Purrch", Command::About),
-            item("Quit", Command::Quit),
-        ]
+        ];
+        if self.linked {
+            items.push(item("Unlink Messapp", Command::Unlink));
+        }
+        items.extend([ksni::MenuItem::Separator, item("About Purrch", Command::About), item("Quit", Command::Quit)]);
+        items
     }
 }
 
@@ -77,7 +82,7 @@ fn icon(size: i32) -> Option<ksni::Icon> {
 /// None when no tray host is running; the notch works without it.
 pub fn spawn(cat: bool, compact: bool, on: fn(Command)) -> Option<ksni::blocking::Handle<Tray>> {
     let icon = [32, 64].into_iter().filter_map(icon).collect();
-    match (Tray { cat, compact, icon, on }).spawn() {
+    match (Tray { cat, compact, linked: false, icon, on }).spawn() {
         Ok(handle) => Some(handle),
         Err(e) => {
             eprintln!("purrch: no tray ({e}); quit with `pkill purrch`");

@@ -1,4 +1,6 @@
 use crate::cat::{self, Cat, Trick};
+use crate::dm::worker::{Cmd, Dm, Out};
+use crate::dm::{DmEvent, Note};
 use crate::lyrics;
 use crate::media::{self, LyricState, Media};
 use crate::pomodoro::{Mode, Pomodoro};
@@ -101,6 +103,15 @@ pub enum Alert {
     Water(Prompt),
     Pomodoro(Mode),
     Task(String),
+    Dm(DmEvent),
+}
+
+/// Where typed text goes. A reply's room is captured when its field is clicked,
+/// so an alert that shows up later never redirects it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditTarget {
+    Todo,
+    Reply { room: String, peer_public: shaiyon_crypto::Jwk },
 }
 
 /// A short status line shown in the closed pill.
@@ -139,6 +150,8 @@ pub enum Action {
     TodoToggle(usize),
     TodoDelete(usize),
     TodoSave,
+    Reply,
+    ReplySend,
     ShelfOpen(usize),
     ShelfRemove(usize),
     ShelfClear,
@@ -240,6 +253,11 @@ pub struct App {
     pub todo: Todo,
     /// Text being typed for a new task; Some while the keyboard is ours.
     pub editing: Option<String>,
+    editing_target: EditTarget,
+    /// The DM worker; None until the platform starts it.
+    pub dm: Option<Dm>,
+    /// Each room's last replied-to DM, to bring its alert back if the send fails.
+    replied: HashMap<String, DmEvent>,
     todo_scroll: usize,
     toast: Option<Toast>,
     power: Option<Power>,
@@ -347,6 +365,9 @@ impl App {
             hits: Vec::new(),
             todo: Todo::load(),
             editing: None,
+            editing_target: EditTarget::Todo,
+            dm: None,
+            replied: HashMap::new(),
             todo_scroll: 0,
             toast: None,
             power: status::power(),
@@ -440,6 +461,66 @@ impl App {
                 Change::Disconnected(name) => self.toast(name, "disconnected".into(), MUTED),
             }
         }
+    }
+
+    /// The DM worker posted: raise DM alerts and toast its notes.
+    pub fn on_dm(&mut self) {
+        let Some(dm) = &self.dm else { return };
+        let out = dm.out.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+        for item in out {
+            let (title, detail, color) = match item {
+                Out::Dm(ev) => {
+                    let typing = self.typing_todo();
+                    if place_dm(&mut self.alert, &mut self.queued, typing, ev) {
+                        chime();
+                    }
+                    continue;
+                }
+                Out::Note(Note::Linked) => ("Messapp linked", "DMs will show here".into(), TASK),
+                Out::Note(Note::LinkFailed) => ("Link failed", "Press Link Purrch again".into(), FOCUS),
+                Out::Note(Note::Unlinked) => ("Messapp unlinked", String::new(), MUTED),
+                Out::Note(Note::Sent) => ("Sent", String::new(), TASK),
+                Out::Note(Note::SendFailed { error, room, text }) => {
+                    // Bring the alert back with the text in its field, unless something else is being typed.
+                    if self.editing.is_none()
+                        && let Some(ev) = self.replied.remove(&room)
+                        && let Some(target) = start_reply(&Alert::Dm(ev.clone()))
+                    {
+                        if let Some(old) = self.alert.replace(Alert::Dm(ev)) {
+                            self.queued.push_front(old);
+                        }
+                        self.editing = Some(text);
+                        self.editing_target = target;
+                    }
+                    ("Not sent", error, FOCUS)
+                }
+            };
+            self.toast(title.into(), detail, color);
+        }
+    }
+
+    /// Whether the tray should offer "Unlink Messapp".
+    pub fn dm_linked(&self) -> bool {
+        self.dm.as_ref().is_some_and(|d| d.linked.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub fn send_dm(&self, cmd: Cmd) {
+        if let Some(d) = &self.dm {
+            let _ = d.cmd.send(cmd);
+        }
+    }
+
+    /// Closes the shown alert; a DM takes its reply field with it. True if one was shown.
+    fn take_alert(&mut self) -> bool {
+        let was = self.alert.take();
+        if matches!(was, Some(Alert::Dm(_))) && self.editing_target != EditTarget::Todo {
+            self.finish_edit(false);
+        }
+        was.is_some()
+    }
+
+    fn typing_todo(&self) -> bool {
+        self.editing.is_some() && self.editing_target == EditTarget::Todo
     }
 
     fn media_snapshot(&self) -> media::Snapshot {
@@ -669,7 +750,7 @@ impl App {
 
     pub fn type_char(&mut self, c: char) {
         if let Some(text) = &mut self.editing
-            && !c.is_control() && text.chars().count() < 80 {
+            && !c.is_control() && text.chars().count() < edit_limit(&self.editing_target) {
                 text.push(c);
             }
     }
@@ -683,11 +764,31 @@ impl App {
     /// Enter (or losing focus) saves the task; Escape throws it away.
     pub fn finish_edit(&mut self, keep: bool) {
         let Some(text) = self.editing.take() else { return };
+        let target = std::mem::replace(&mut self.editing_target, EditTarget::Todo);
         if !keep {
+            return;
+        }
+        if let EditTarget::Reply { room, .. } = &target {
+            if let Some(cmd) = submit(&target, &text) {
+                self.send_dm(cmd);
+                if let Some(Alert::Dm(ev)) = &self.alert
+                    && ev.room == *room
+                {
+                    self.replied.insert(room.clone(), ev.clone());
+                    self.alert = None;
+                }
+            }
             return;
         }
         if self.todo.write(None, &text) {
             self.todo.save();
+        }
+    }
+
+    /// Losing focus saves a to-do but keeps a reply in its field: a half-typed message must not send.
+    pub fn blur(&mut self) {
+        if self.editing_target == EditTarget::Todo {
+            self.finish_edit(true);
         }
     }
 
@@ -1048,7 +1149,7 @@ impl App {
             self.todo.save();
             self.raise(Alert::Task(title));
         }
-        if self.alert.is_none() {
+        if self.alert.is_none() && !self.typing_todo() {
             if let Some(next) = self.queued.pop_front() {
                 self.raise(next);
             }
@@ -1142,7 +1243,7 @@ impl App {
             Action::Tab(t) => {
                 let dir = (Self::page_index(t) - Self::page_index(self.tab)).signum() as f32;
                 // Leaving an alert for a page is a jump, not a slide.
-                if self.alert.take().is_some() {
+                if self.take_alert() {
                     self.tab = t;
                     self.water_settings = false;
                 } else {
@@ -1168,7 +1269,9 @@ impl App {
                 self.water.snooze(c.minute);
                 self.alert = None;
             }
-            Action::Dismiss => self.alert = None,
+            Action::Dismiss => {
+                self.take_alert();
+            }
             Action::WaterSettings(on) => self.water_settings = on,
             Action::Bottle(d) => self.water.step_bottle(d),
             Action::Goal(g) => self.water.set_goal(g),
@@ -1190,8 +1293,20 @@ impl App {
                 self.alert = None;
                 self.tab = Tab::Focus;
             }
-            Action::TodoAdd => self.editing = Some(String::new()),
-            Action::TodoSave => self.finish_edit(true),
+            Action::TodoAdd => {
+                self.editing = Some(String::new());
+                self.editing_target = EditTarget::Todo;
+            }
+            Action::TodoSave | Action::ReplySend => self.finish_edit(true),
+            Action::Reply => {
+                // Clicking the field again keeps what was typed (say, after a failed send).
+                if let Some(target) = self.alert.as_ref().and_then(start_reply)
+                    && (self.editing.is_none() || self.editing_target != target)
+                {
+                    self.editing = Some(String::new());
+                    self.editing_target = target;
+                }
+            }
             Action::TodoToggle(i) => {
                 if let Some(t) = self.todo.tasks.get_mut(i) {
                     t.done = !t.done;
@@ -2051,7 +2166,7 @@ impl App {
 
         let mut y = 56.0;
         let mut rows = TODO_ROWS;
-        if let Some(text) = &self.editing {
+        if let (Some(text), EditTarget::Todo) = (&self.editing, &self.editing_target) {
             let field = Rect::new(x0, y, right - x0, 21.0);
             p.round(field, 10.5, CHIP);
             // A caret even when empty, so the box reads as something to type into.
@@ -2120,12 +2235,41 @@ impl App {
                 ("Got it".to_string(), Action::Dismiss),
                 ("Show list".to_string(), Action::Tab(Tab::Todo)),
             ),
+            Alert::Dm(ev) => return self.draw_dm(p, x, ev),
         };
         p.text(&title, Rect::new(x, 36.0, OPEN_W, 24.0), Font::Title, TEXT, Align::Center);
         p.text(&body, Rect::new(x + 44.0, 60.0, OPEN_W - 88.0, 16.0), Font::Small, MUTED, Align::Center);
         let cx = x + OPEN_W / 2.0;
         self.chip(p, Rect::new(cx - 128.0, 88.0, 124.0, 28.0), Ico::None, &yes.0, yes.1, accent, BG);
         self.chip(p, Rect::new(cx + 4.0, 88.0, 124.0, 28.0), Ico::None, &no.0, no.1, CHIP, TEXT);
+    }
+}
+
+impl App {
+    /// Sender and preview with a reply field, or "New message" when it can't be read or answered.
+    fn draw_dm(&mut self, p: &Painter, x: f32, ev: DmEvent) {
+        let (x0, w) = (x + 44.0, OPEN_W - 88.0);
+        p.text(&ev.sender, Rect::new(x0, 34.0, w, 22.0), Font::Body, TEXT, Align::Center);
+        let Some(preview) = ev.preview.as_ref().filter(|_| can_reply(&ev)) else {
+            p.text("New message", Rect::new(x0, 58.0, w, 16.0), Font::Small, MUTED, Align::Center);
+            let cx = x + OPEN_W / 2.0;
+            self.chip(p, Rect::new(cx - 62.0, 88.0, 124.0, 28.0), Ico::None, "Dismiss", Action::Dismiss, CHIP, TEXT);
+            return;
+        };
+        p.text(preview, Rect::new(x0, 58.0, w, 16.0), Font::Small, MUTED, Align::Center);
+        let field = Rect::new(x0, 90.0, w - 28.0, 21.0);
+        p.round(field, 10.5, self.lit(field, CHIP));
+        let typing = self.editing.clone().filter(|_| matches!(&self.editing_target, EditTarget::Reply { room, .. } if *room == ev.room));
+        let (shown, color) = match &typing {
+            Some(text) if !text.is_empty() => (format!("{text}|"), TEXT),
+            Some(_) => ("|  Reply".to_string(), MUTED),
+            None => ("Reply".to_string(), MUTED),
+        };
+        p.text(&shown, Rect::new(field.x + 12.0, field.y, field.w - 40.0, field.h), Font::Small, color, Align::Left);
+        self.hits.push((field, Action::Reply));
+        let send = if typing.is_some_and(|t| !t.trim().is_empty()) { WATER } else { MUTED };
+        self.icon_button(p, Rect::new(field.x + field.w - 26.0, field.y + 1.5, 24.0, 18.0), "\u{E724}", Font::Icon, Action::ReplySend, CHIP_ON, send);
+        self.icon_button(p, Rect::new(field.x + field.w + 6.0, field.y, 22.0, 21.0), "\u{E711}", Font::Icon, Action::Dismiss, CHIP, MUTED);
     }
 }
 
@@ -2190,19 +2334,54 @@ fn draw_shape(p: &Painter, shape: Shape, cx: f32, cy: f32, s: f32, c: Color) {
 }
 
 /// Shows `alert` now or queues it. Returns true when it is shown. A pomodoro alert outranks
-/// whatever is showing; task reminders wait their turn because `Todo::due` fires them only once.
+/// whatever is showing; task reminders and DMs wait their turn because each arrives only once.
 fn place_alert(current: &mut Option<Alert>, queued: &mut VecDeque<Alert>, alert: Alert) -> bool {
     if current.is_none() || matches!(alert, Alert::Pomodoro(_)) {
-        if let Some(old @ Alert::Task(_)) = current.replace(alert) {
+        if let Some(old @ (Alert::Task(_) | Alert::Dm(_))) = current.replace(alert) {
             queued.push_front(old);
         }
         true
     } else {
-        if matches!(alert, Alert::Task(_)) {
+        if matches!(alert, Alert::Task(_) | Alert::Dm(_)) {
             queued.push_back(alert);
         }
         false
     }
+}
+
+/// A DM never takes over a to-do being typed: it waits in the queue instead.
+fn place_dm(current: &mut Option<Alert>, queued: &mut VecDeque<Alert>, typing_todo: bool, ev: DmEvent) -> bool {
+    if typing_todo {
+        queued.push_back(Alert::Dm(ev));
+        return false;
+    }
+    place_alert(current, queued, Alert::Dm(ev))
+}
+
+/// Replying needs the decrypted text (else there is nothing to answer) and the sender's key.
+fn can_reply(ev: &DmEvent) -> bool {
+    ev.preview.is_some() && ev.peer_public.is_some()
+}
+
+fn start_reply(alert: &Alert) -> Option<EditTarget> {
+    match alert {
+        Alert::Dm(ev) if can_reply(ev) => Some(EditTarget::Reply { room: ev.room.clone(), peer_public: ev.peer_public.clone()? }),
+        _ => None,
+    }
+}
+
+fn edit_limit(target: &EditTarget) -> usize {
+    match target {
+        EditTarget::Todo => 80,
+        EditTarget::Reply { .. } => 200,
+    }
+}
+
+/// The command a finished reply sends; None for a to-do or blank text.
+fn submit(target: &EditTarget, text: &str) -> Option<Cmd> {
+    let EditTarget::Reply { room, peer_public } = target else { return None };
+    let text = text.trim();
+    (!text.is_empty()).then(|| Cmd::Reply { room: room.clone(), text: text.into(), peer_public: peer_public.clone() })
 }
 
 /// Length of the pill's visible outline pushed `d` outside it, from `top` down the left side,
@@ -2274,5 +2453,47 @@ mod tests {
         // A pomodoro bumps the shown task back to the front of the queue.
         assert!(place_alert(&mut cur, &mut q, Alert::Pomodoro(Mode::Short)));
         assert_eq!(q, [Alert::Task("a".into())]);
+    }
+
+    fn dm(room: &str, preview: Option<&str>) -> DmEvent {
+        let peer_public = Some(shaiyon_crypto::generate_keypair().public());
+        DmEvent { room: room.into(), sender: "alice".into(), preview: preview.map(Into::into), peer_public }
+    }
+
+    #[test]
+    fn dm_alert_queues_while_editing_todo() {
+        let (mut cur, mut q) = (None, VecDeque::new());
+        assert!(!place_dm(&mut cur, &mut q, true, dm("r1", Some("hi"))));
+        assert_eq!(cur, None);
+        assert_eq!(q.len(), 1);
+        // DMs wait behind whatever is showing and never bump it.
+        let mut cur = Some(Alert::Task("a".into()));
+        assert!(!place_dm(&mut cur, &mut q, false, dm("r2", Some("hi"))));
+        assert_eq!(cur, Some(Alert::Task("a".into())));
+        assert_eq!(edit_limit(&EditTarget::Todo), 80);
+    }
+
+    #[test]
+    fn reply_targets_shown_room() {
+        let (mut cur, mut q) = (None, VecDeque::new());
+        assert!(place_dm(&mut cur, &mut q, false, dm("r1", Some("hi"))));
+        assert!(!place_dm(&mut cur, &mut q, false, dm("r2", Some("yo"))));
+        let target = start_reply(cur.as_ref().unwrap()).unwrap();
+        assert_eq!(edit_limit(&target), 200);
+        // A later alert taking the screen must not redirect the captured target.
+        cur = q.pop_front();
+        assert!(matches!(submit(&target, " ok "), Some(Cmd::Reply { room, text, .. }) if room == "r1" && text == "ok"));
+        assert!(submit(&target, "  ").is_none());
+        assert!(submit(&EditTarget::Todo, "ok").is_none());
+        assert!(matches!(cur, Some(Alert::Dm(ev)) if ev.room == "r2"));
+    }
+
+    #[test]
+    fn undecryptable_dm_has_no_reply() {
+        assert!(start_reply(&Alert::Dm(dm("r1", None))).is_none());
+        let mut no_key = dm("r1", Some("hi"));
+        no_key.peer_public = None;
+        assert!(start_reply(&Alert::Dm(no_key)).is_none());
+        assert!(start_reply(&Alert::Task("a".into())).is_none());
     }
 }

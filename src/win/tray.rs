@@ -16,6 +16,7 @@ pub enum Command {
     Compact,
     About,
     Quit,
+    Unlink,
 }
 
 /// The embedded logo (resource id 1, see build.rs) at the tray's small-icon size.
@@ -83,7 +84,7 @@ pub fn set_autostart(on: bool) {
 
 /// Shows the menu and returns the picked command. Pumps messages while open,
 /// so callers must not hold app state borrowed across this call.
-pub fn menu(hwnd: HWND, cat: bool, compact: bool) -> Option<Command> {
+pub fn menu(hwnd: HWND, cat: bool, compact: bool, linked: bool) -> Option<Command> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
         let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
@@ -95,6 +96,9 @@ pub fn menu(hwnd: HWND, cat: bool, compact: bool) -> Option<Command> {
         for (cmd, label, flags) in items {
             let _ = AppendMenuW(menu, MF_STRING | flags, cmd as usize, &HSTRING::from(label));
         }
+        if linked {
+            let _ = AppendMenuW(menu, MF_STRING, Command::Unlink as usize, w!("Unlink Messapp"));
+        }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, Command::About as usize, w!("About Purrch"));
         let _ = AppendMenuW(menu, MF_STRING, Command::Quit as usize, w!("Quit"));
@@ -105,7 +109,7 @@ pub fn menu(hwnd: HWND, cat: bool, compact: bool) -> Option<Command> {
         let _ = SetForegroundWindow(hwnd);
         let picked = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, None);
         let _ = DestroyMenu(menu);
-        [Command::Autostart, Command::Cat, Command::Compact, Command::About, Command::Quit]
+        [Command::Autostart, Command::Cat, Command::Compact, Command::About, Command::Quit, Command::Unlink]
             .into_iter()
             .find(|c| *c as i32 == picked.0)
     }
