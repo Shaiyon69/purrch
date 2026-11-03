@@ -242,7 +242,7 @@ impl Worker {
                 _ = cmd_tick.tick() => match self.cmds.try_recv() {
                     Ok(Cmd::Reply { room, text, peer_public }) => self.reply(&client, &mut saved, &tokens, &keys, room, text, &peer_public).await,
                     Ok(Cmd::Unlink) => {
-                        let _ = client.sign_out().await;
+                        // No sign_out: GoTrue's /logout is global and would sign the user out of Messapp and Chimaera too.
                         self.unlink();
                         Err(Fail::Gone)
                     }
