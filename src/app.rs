@@ -520,6 +520,13 @@ impl App {
             }
             return;
         }
+        // Over the page dots the wheel always flips pages, so a long shelf or list never traps it.
+        // y >= 120 skips the task alert's "Show list" button, which is also an `Action::Tab`.
+        let over_dots = self.mouse.is_some_and(|(x, y)| self.hits.iter().any(|(r, a)| matches!(a, Action::Tab(_)) && r.y >= 120.0 && r.contains(x, y)));
+        if over_dots {
+            self.turn(delta);
+            return;
+        }
         // Lists scroll first; at either end the wheel flips the page.
         let before = (self.todo_scroll, self.shelf_scroll);
         match self.tab {
