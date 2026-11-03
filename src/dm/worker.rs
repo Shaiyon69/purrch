@@ -20,6 +20,9 @@ const POLL: Duration = Duration::from_secs(10);
 const CMD_POLL: Duration = Duration::from_millis(500);
 /// Refresh this many seconds before the access token expires.
 const REFRESH_MARGIN_SECS: i64 = 60;
+/// Under GoTrue's 10 s refresh-token reuse window, so replaying a refresh whose
+/// response was lost gets the same session back instead of revoking it.
+const REFRESH_RETRY: Duration = Duration::from_secs(3);
 
 pub enum Cmd {
     Reply { room: String, text: String, peer_public: Jwk },
@@ -209,8 +212,13 @@ impl Worker {
         client.set_session(Some(Session { access_token: String::new(), refresh_token: saved.refresh_token.clone(), expires_at: 0, user })).await;
         self.linked.store(true, Ordering::Relaxed);
         let (tokens, token_rx) = watch::channel(String::new());
-        if self.refresh(&client, &mut saved, &tokens).await.is_err() {
-            return true;
+        match self.refresh(&client, &mut saved, &tokens).await {
+            Ok(()) => {}
+            Err(Fail::Gone) => return true,
+            Err(Fail::Retry) => {
+                tokio::time::sleep(REFRESH_RETRY).await;
+                return false;
+            }
         }
         let keys = KeyVault::new(OsStore).load(&uid).unwrap_or_default();
 
@@ -263,7 +271,7 @@ impl Worker {
                     }
                 }
                 Err(Fail::Gone) => return true,
-                Err(Fail::Retry) => retry_at = Some(Instant::now() + POLL),
+                Err(Fail::Retry) => retry_at = Some(Instant::now() + REFRESH_RETRY),
             }
         }
     }
