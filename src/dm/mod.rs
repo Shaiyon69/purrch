@@ -4,8 +4,9 @@ mod worker;
 
 use serde::{Deserialize, Serialize};
 use shaiyon_crypto::{Envelope, Jwk};
+use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkEntry {
     pub uid: String,
     pub token_hash: String,
@@ -13,12 +14,25 @@ pub struct LinkEntry {
     pub anon_key: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedSession {
     pub uid: String,
     pub refresh_token: String,
     pub url: String,
     pub anon_key: String,
+}
+
+// Hand-written so tokens never reach a log line.
+impl fmt::Debug for LinkEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinkEntry").field("uid", &self.uid).field("url", &self.url).finish()
+    }
+}
+
+impl fmt::Debug for SavedSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SavedSession").field("uid", &self.uid).field("url", &self.url).finish()
+    }
 }
 
 /// `preview == None` means the message could not be decrypted, so replying is disabled.
@@ -144,6 +158,16 @@ mod tests {
         let (alice, bob) = (shaiyon_crypto::generate_keypair(), shaiyon_crypto::generate_keypair());
         assert!(reply_row("a", "r1", &alice.public(), &bob.public(), "yo").is_err());
         assert!(reply_row("a", "r1", &alice, &bob.public(), "  ").is_err());
+    }
+
+    #[test]
+    fn debug_hides_secrets() {
+        let link = LinkEntry { uid: "u1".into(), token_hash: "SECRET-HASH".into(), url: "https://x".into(), anon_key: "SECRET-ANON".into() };
+        let saved = SavedSession { uid: "u1".into(), refresh_token: "SECRET-REFRESH".into(), url: "https://x".into(), anon_key: "SECRET-ANON".into() };
+        for out in [format!("{link:?}"), format!("{saved:?}")] {
+            assert!(out.contains("u1") && out.contains("https://x"));
+            assert!(!out.contains("SECRET"), "{out}");
+        }
     }
 
     #[test]
