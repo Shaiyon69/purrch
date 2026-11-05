@@ -681,7 +681,7 @@ pub fn run() -> Result<()> {
         let state = State {
             hwnd,
             app,
-            renderer: Renderer::new(w, h)?,
+            renderer: Renderer::new(w, h, scale)?,
             scale,
             origin,
             taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
@@ -696,7 +696,7 @@ pub fn run() -> Result<()> {
             peeked: false,
             away_since: None,
             stray,
-            stray_renderer: Renderer::new(sw, sh)?,
+            stray_renderer: Renderer::new(sw, sh, scale)?,
             stray_shown: false,
         };
         STATE.with(|s| *s.borrow_mut() = Some(state));

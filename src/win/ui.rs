@@ -52,7 +52,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(width: i32, height: i32) -> Result<Renderer> {
+    pub fn new(width: i32, height: i32, scale: f32) -> Result<Renderer> {
         unsafe {
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let props = D2D1_RENDER_TARGET_PROPERTIES {
@@ -64,6 +64,9 @@ impl Renderer {
                 ..Default::default()
             };
             let target = factory.CreateDCRenderTarget(&props)?;
+            // The window is sized from this scale; left to itself the surface can stay at 100% and draw
+            // everything left of centre on a scaled laptop display.
+            target.SetDpi(96.0 * scale, 96.0 * scale);
             target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let brush = target.CreateSolidColorBrush(&color(rgba(1.0, 1.0, 1.0, 1.0)), None)?;
             let layer = || target.CreateLayer(None);
@@ -485,6 +488,23 @@ impl Painter<'_> {
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window is sized from the display scale, and the notch is drawn centred in DIPs. They only
+    /// line up if the surface uses that same scale: at 100% it would draw left of centre.
+    #[test]
+    fn the_surface_draws_at_the_scale_the_window_was_sized_for() {
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let renderer = Renderer::new(1000, 200, scale).unwrap();
+            let (mut x, mut y) = (0.0, 0.0);
+            unsafe { renderer.target.GetDpi(&mut x, &mut y) };
+            assert_eq!((x, y), (96.0 * scale, 96.0 * scale));
         }
     }
 }
