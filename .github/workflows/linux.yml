@@ -32,7 +32,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libwayland-dev wayland-protocols meson ninja-build pkg-config file
+          sudo apt-get install -y libdbus-1-dev libgtk-4-dev libwayland-dev wayland-protocols meson ninja-build pkg-config file
 
       # Ubuntu 24.04 doesn't package gtk4-layer-shell, so build a pinned release.
       - name: Build gtk4-layer-shell
