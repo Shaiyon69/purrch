@@ -55,6 +55,7 @@ fn glyph(c: char) -> Option<Glyph> {
         '\u{E710}' => Glyph::Text("+"),
         '\u{E73E}' => Glyph::Text("\u{2713}"),
         '\u{E711}' => Glyph::Text("\u{2715}"),
+        '\u{E724}' => Glyph::Text("\u{27A4}"),
         '\u{E896}' => Glyph::Text("\u{2193}"),
         '\u{E767}' => Glyph::Speaker,
         '\u{E74F}' => Glyph::Mute,

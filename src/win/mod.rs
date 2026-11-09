@@ -4,7 +4,7 @@ mod tray;
 
 use crate::app::{self, App};
 use crate::ui::{Rect, Renderer};
-use crate::{bluetooth, cat, media, shelf, status};
+use crate::{bluetooth, cat, dm, media, shelf, status};
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,6 +36,7 @@ const TIMER_OPEN: usize = 5;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_MEDIA: u32 = WM_APP + 2;
 const WM_BLUETOOTH: u32 = WM_APP + 3;
+const WM_DM: u32 = WM_APP + 4;
 
 struct State {
     hwnd: HWND,
@@ -306,10 +307,13 @@ fn on_tray(hwnd: HWND, event: u32) {
     if event != WM_RBUTTONUP && event != WM_CONTEXTMENU {
         return;
     }
-    let Some((cat, compact)) = with_state(|s| (s.app.cat, s.app.compact)) else { return };
+    let Some((cat, compact, linked)) = with_state(|s| (s.app.cat, s.app.compact, s.app.dm_linked())) else { return };
     // The menu runs its own message loop, so no state may be borrowed while it is open.
-    let Some(cmd) = tray::menu(hwnd, cat, compact) else { return };
+    let Some(cmd) = tray::menu(hwnd, cat, compact, linked) else { return };
     match cmd {
+        tray::Command::Unlink => {
+            with_state(|s| s.app.send_dm(dm::worker::Cmd::Unlink));
+        }
         tray::Command::Autostart => tray::set_autostart(!tray::autostart_enabled()),
         tray::Command::About => tray::about(hwnd),
         tray::Command::Quit => unsafe {
@@ -501,7 +505,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         }
         WM_KILLFOCUS => {
             with_state(|s| {
-                s.app.finish_edit(true);
+                s.app.blur();
                 s.start_anim();
                 s.render();
             });
@@ -528,6 +532,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             with_state(|s| {
                 let changes = s.bluetooth.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
                 s.app.on_bluetooth(changes);
+                s.start_anim();
+                s.render();
+            });
+            LRESULT(0)
+        }
+        WM_DM => {
+            with_state(|s| {
+                s.app.on_dm();
                 s.start_anim();
                 s.render();
             });
@@ -664,11 +676,12 @@ pub fn run() -> Result<()> {
         let ole = OleInitialize(None).is_ok();
         let mut app = App::load();
         app.media = Some(media::Media::start(poster(hwnd, WM_MEDIA)));
+        app.dm = Some(dm::worker::start(poster(hwnd, WM_DM)));
         app.mascot.can_stray = true;
         let state = State {
             hwnd,
             app,
-            renderer: Renderer::new(w, h)?,
+            renderer: Renderer::new(w, h, scale)?,
             scale,
             origin,
             taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
@@ -683,7 +696,7 @@ pub fn run() -> Result<()> {
             peeked: false,
             away_since: None,
             stray,
-            stray_renderer: Renderer::new(sw, sh)?,
+            stray_renderer: Renderer::new(sw, sh, scale)?,
             stray_shown: false,
         };
         STATE.with(|s| *s.borrow_mut() = Some(state));

@@ -32,11 +32,12 @@ Purrch sits at the top of your screen as a small pill and opens into a panel whe
 - **Clipboard peek**: copy a hex colour, a link or a sum like `12*7+3`, and the pill shows the swatch, the site or the answer (Windows).
 - **Screenshot catcher**: a Win+Shift+S snip lands in the Shelf on its own.
 - **Colour picker**: press Ctrl+Alt+C and keep holding Ctrl+Alt; the cat's eyes take the colour under the cursor, and letting go copies its hex code.
+- **Messapp DMs**: link Purrch from Messapp desktop (Settings, Link Purrch). New DMs then pop up in the notch with a decrypted preview and a quick reply.
 - **Stays out of the way**: the notch hides itself while a full-screen app is in front.
 
 ### Tray
 
-Right-click the tray icon for *Start with Windows* (*Start on login* on Linux), *Show the cat*, *Compact notch* and *Quit*.
+Right-click the tray icon for *Start with Windows* (*Start on login* on Linux), *Show the cat*, *Compact notch*, *Unlink Messapp* (once linked) and *Quit*.
 
 ## Install
 
@@ -56,6 +57,8 @@ Download `Purrch-x86_64.AppImage`, make it executable (`chmod +x Purrch-x86_64.A
 - **Differences from Windows**: on Wayland the cat's eyes follow the cursor only over the notch, and full-screen apps cover the notch instead of it sliding away. Shelf thumbnails show image previews only, and the icons are standard symbols instead of Segoe Fluent Icons.
 
 ## Build
+
+`shaiyon-core` (the shared crypto and Supabase crates) is a private repo. Building from source needs read access to `Shaiyon69/shaiyon-core`; CI fetches it over SSH with a deploy key.
 
 ### Windows
 
@@ -95,12 +98,14 @@ Everything stays on your machine, as plain text in `%APPDATA%\Purrch\` (Linux: `
 | `water.txt` | bottle, goal, hours and today's progress |
 | `todo.txt` | tasks, one per line |
 | `shelf.txt` | paths of shelved items |
-| `pet.txt` | how fed the cat is and its good-day streak |
+| `pet.txt` | how fed the cat is |
+
+Once linked to Messapp, Purrch also keeps two entries in the OS keyring, under the service `skibi`: `purrch_link` (a one-time code, deleted after use) and `purrch_session` (refresh token, user id, Supabase URL and anon key). *Unlink Messapp* in the tray removes them.
 
 Dropped links, text snippets and caught screenshots are saved as files in `%LOCALAPPDATA%\Purrch\Shelf\` (Linux: `~/.local/share/purrch/shelf/`).
 
 > [!TIP]
-> The only network request Purrch makes is the lyrics lookup to lrclib.net, which sends the song title and artist. On Linux, album art that a player provides as a web link (Spotify, browsers) is also downloaded from that link.
+> Purrch makes two kinds of network request. The lyrics lookup to lrclib.net sends the song title and artist. Once you link Messapp, Purrch also talks to Messapp's Supabase to receive and send DMs. On Linux, album art that a player provides as a web link (Spotify, browsers) is also downloaded from that link.
 
 ## License
 

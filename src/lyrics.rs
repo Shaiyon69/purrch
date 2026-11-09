@@ -2,13 +2,6 @@
 
 use std::time::Duration;
 
-#[cfg(windows)]
-#[path = "win/lyrics.rs"]
-mod imp;
-#[cfg(target_os = "linux")]
-#[path = "linux/lyrics.rs"]
-mod imp;
-
 const USER_AGENT: &str = "Purrch/0.1 (open-source notch app)";
 
 pub type Lines = Vec<(Duration, String)>;
@@ -19,6 +12,24 @@ pub struct Offline;
 
 /// (duration, synced lyrics) per search result.
 type Results = Vec<(f64, Option<String>)>;
+
+fn search(query: &str) -> Result<Results, Offline> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| Offline)?;
+    let res = client.get(format!("https://lrclib.net/api/search?{query}")).send().map_err(|_| Offline)?;
+    parse_results(&res.error_for_status().map_err(|_| Offline)?.text().map_err(|_| Offline)?)
+}
+
+/// (duration, synced lyrics) per search result. Either field can be null, so neither may fail
+/// the whole list: one entry with `"duration": null` used to hide every other match.
+fn parse_results(body: &str) -> Result<Results, Offline> {
+    let items: serde_json::Value = serde_json::from_str(body).map_err(|_| Offline)?;
+    let items = items.as_array().ok_or(Offline)?;
+    Ok(items.iter().map(|i| (i["duration"].as_f64().unwrap_or(0.0), i["syncedLyrics"].as_str().map(String::from))).collect())
+}
 
 /// Players often append "(Remastered 2011)", "[Live]" or " - Radio Edit", which breaks lookups.
 pub fn clean_title(title: &str) -> &str {
@@ -146,7 +157,7 @@ pub fn queries(title: &str, artist: &str) -> Vec<String> {
 /// Err only when every search failed to reach LRCLIB, so the caller can retry.
 pub fn fetch(title: &str, artist: &str, length: Duration) -> Result<Option<Lines>, Offline> {
     let results: Vec<_> = std::thread::scope(|s| {
-        let jobs: Vec<_> = queries(title, artist).into_iter().map(|q| s.spawn(move || imp::search(&q))).collect();
+        let jobs: Vec<_> = queries(title, artist).into_iter().map(|q| s.spawn(move || search(&q))).collect();
         jobs.into_iter().map(|j| j.join().unwrap_or(Err(Offline))).collect()
     });
     if let Some(lines) = results.iter().flatten().find_map(|r| pick(r, length)) {
@@ -163,6 +174,12 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "hits lrclib.net; run with --ignored"]
+    fn live_lookup() {
+        assert!(fetch("Hello", "Adele", Duration::from_secs(295)).unwrap().is_some());
+    }
+
+    #[test]
     fn cleans_titles() {
         assert_eq!(clean_title("Song (Remastered 2011)"), "Song");
         assert_eq!(clean_title("Song - Radio Edit [Live]"), "Song");
@@ -172,7 +189,7 @@ mod tests {
     #[test]
     fn null_fields_keep_the_other_results() {
         let body = r#"[{"duration":null,"syncedLyrics":"[00:01.00]a"},{"duration":263.0,"syncedLyrics":null},{"duration":263.0,"syncedLyrics":"[00:01.00]b"}]"#;
-        let r = imp::parse_results(body).unwrap();
+        let r = parse_results(body).unwrap();
         assert_eq!(r.len(), 3);
         assert_eq!(r[0].0, 0.0);
         assert_eq!(pick(&r, Duration::from_secs(262)).unwrap()[0].1, "b");

@@ -3,7 +3,6 @@
 //! and a startled, happy wake-up with a paw wave when you come back.
 //! While awake it fidgets every few seconds (glance, yawn, wink, ear flick, purr); asleep, its ear twitches.
 
-use crate::pet::Accessory;
 use crate::ui::{Align, Color, Font, Painter, Rect, rgba};
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
@@ -25,10 +24,6 @@ const ZZZ: Color = rgba(0.62, 0.62, 0.66, 1.0);
 /// Grey so the headset shows on the black notch.
 const HEADSET: Color = rgba(0.36, 0.36, 0.39, 1.0);
 const BROW: Color = rgba(0.85, 0.85, 0.88, 1.0);
-const COLLAR: Color = rgba(0.85, 0.3, 0.36, 1.0);
-const BELL: Color = rgba(1.0, 0.82, 0.3, 1.0);
-// Teal, not red: at notch size a red band under the face reads as an open mouth.
-const SCARF: Color = rgba(0.3, 0.72, 0.82, 1.0);
 
 const IDLE_MS: u32 = 15_000;
 const DROWSY_SECS: f32 = 5.5;
@@ -128,8 +123,6 @@ pub struct Cat {
     headset_c: Color,
     /// Hungry: furrowed brows and no blush.
     pub grumpy: bool,
-    /// Earned by good days in a row.
-    pub accessory: Accessory,
 }
 
 impl Cat {
@@ -151,7 +144,6 @@ impl Cat {
             headset_t: 0.0,
             headset_c: EYE,
             grumpy: false,
-            accessory: Accessory::None,
             next_trick: now + Duration::from_secs(8),
             spot: (0.0, 0.0),
         }
@@ -457,19 +449,6 @@ impl Cat {
             let x0 = nx + side * 4.0 * s;
             p.line(x0, ny + 0.6 * s, x0 + side * 5.0 * s, ny - 0.1 * s, WHISKER, 0.5 * s);
             p.line(x0, ny + 1.5 * s, x0 + side * 5.0 * s, ny + 2.1 * s, WHISKER, 0.5 * s);
-        }
-        match self.accessory {
-            Accessory::None => {}
-            Accessory::Bell => {
-                p.arc(cx + lean, cy - 1.0 * s, 10.0 * s, 60.0, 60.0, COLLAR, 1.0 * s);
-                p.ellipse(cx + lean, cy + 9.9 * s, 1.6 * s, 1.6 * s, BELL);
-                p.line(cx + lean - 0.7 * s, cy + 10.4 * s, cx + lean + 0.7 * s, cy + 10.4 * s, PUPIL, 0.4 * s);
-            }
-            Accessory::Scarf => {
-                p.arc(cx + lean, cy - 4.0 * s, 13.5 * s, 62.0, 56.0, SCARF, 1.9 * s);
-                let (tx, ty) = (cx + lean + 4.5 * s, cy + 9.0 * s);
-                p.triangle([(tx - 1.2 * s, ty), (tx + 1.4 * s, ty), (tx + 0.8 * s, ty + 4.0 * s)], SCARF);
-            }
         }
         if hk > 0.01 {
             let tip = alpha(self.headset_c, hk);

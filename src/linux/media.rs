@@ -92,8 +92,8 @@ pub fn read_art(name: &Session) -> Option<Vec<u8>> {
         return std::fs::read(path).ok();
     }
     if url.starts_with("https://") || url.starts_with("http://") {
-        let out = Command::new("curl").args(["-fsSL", "--max-time", "10", &url]).output().ok()?;
-        return out.status.success().then_some(out.stdout);
+        let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(10)).build().ok()?;
+        return client.get(&url).send().ok()?.error_for_status().ok()?.bytes().ok().map(|b| b.to_vec());
     }
     None
 }

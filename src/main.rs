@@ -4,6 +4,7 @@ mod app;
 mod beat;
 mod bluetooth;
 mod cat;
+mod dm;
 mod lyrics;
 mod media;
 mod peek;
