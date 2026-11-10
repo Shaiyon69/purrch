@@ -476,6 +476,10 @@ impl App {
                     }
                     continue;
                 }
+                Out::Playing { friend, title } => {
+                    self.toast(format!("{friend} started playing"), title, TASK);
+                    continue;
+                }
                 Out::Note(Note::Linked) => ("Messapp linked", "DMs will show here".into(), TASK),
                 Out::Note(Note::LinkFailed) => ("Link failed", "Press Link Purrch again".into(), FOCUS),
                 Out::Note(Note::Unlinked) => ("Messapp unlinked", String::new(), MUTED),

@@ -2305,8 +2305,8 @@ dependencies = [
 
 [[package]]
 name = "shaiyon-crypto"
-version = "0.3.0"
-source = "git+https://github.com/Shaiyon69/shaiyon-core?tag=v0.3.0#92b86ee57c01ab00d431f7752e68caac289f8a47"
+version = "0.4.0"
+source = "git+https://github.com/Shaiyon69/shaiyon-core?tag=v0.4.0#752716a0439e571efe6bb327769c13b51820323b"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -2320,8 +2320,8 @@ dependencies = [
 
 [[package]]
 name = "shaiyon-keys"
-version = "0.3.0"
-source = "git+https://github.com/Shaiyon69/shaiyon-core?tag=v0.3.0#92b86ee57c01ab00d431f7752e68caac289f8a47"
+version = "0.4.0"
+source = "git+https://github.com/Shaiyon69/shaiyon-core?tag=v0.4.0#752716a0439e571efe6bb327769c13b51820323b"
 dependencies = [
  "keyring",
  "serde",
@@ -2331,8 +2331,8 @@ dependencies = [
 
 [[package]]
 name = "shaiyon-supabase"
-version = "0.3.0"
-source = "git+https://github.com/Shaiyon69/shaiyon-core?tag=v0.3.0#92b86ee57c01ab00d431f7752e68caac289f8a47"
+version = "0.4.0"
+source = "git+https://github.com/Shaiyon69/shaiyon-core?tag=v0.4.0#752716a0439e571efe6bb327769c13b51820323b"
 dependencies = [
  "futures-util",
  "reqwest",

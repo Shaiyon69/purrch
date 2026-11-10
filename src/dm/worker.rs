@@ -1,10 +1,11 @@
 //! The DM worker: links via the keyring, keeps the session fresh and saved,
 //! listens on the user's private realtime topic, and sends replies.
 
-use super::{DmEvent, LinkEntry, Note, SavedSession, decrypt, preview, reply_row, wanted};
+use super::{DmEvent, LinkEntry, Note, PLAYING_TOPIC, PlayWatch, SavedSession, decrypt, friends, friends_query, playing_title, preview, reply_row, wanted};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use shaiyon_crypto::Jwk;
+use std::collections::HashMap;
 use shaiyon_keys::{E2eeKeys, KeyVault, OsStore, SecretStore};
 use shaiyon_supabase::{Client, Error, Session, User, realtime};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +19,8 @@ const LINK: &str = "purrch_link";
 const SESSION: &str = "purrch_session";
 const POLL: Duration = Duration::from_secs(10);
 const CMD_POLL: Duration = Duration::from_millis(500);
+/// How often the friend list is read again, to watch new friends.
+const FRIENDS_POLL: Duration = Duration::from_secs(600);
 /// Refresh this many seconds before the access token expires.
 const REFRESH_MARGIN_SECS: i64 = 60;
 /// Under GoTrue's 10 s refresh-token reuse window, so replaying a refresh whose
@@ -32,6 +35,17 @@ pub enum Cmd {
 pub enum Out {
     Dm(DmEvent),
     Note(Note),
+    /// A friend just started a game in Chimaera.
+    Playing { friend: String, title: String },
+}
+
+/// The friends' presence listener; dropping it (session end, new friend set) stops it.
+struct Task(tokio::task::JoinHandle<()>);
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 pub struct Dm {
@@ -224,11 +238,17 @@ impl Worker {
 
         let topic = format!("user:{uid}");
         let (events_tx, mut events) = mpsc::channel(32);
+        let presence_tokens = token_rx.clone();
         let listener = realtime::listen(&url, &anon_key, &topic, token_rx, events_tx);
         tokio::pin!(listener);
         let mut cmd_tick = tokio::time::interval(CMD_POLL);
         let mut state_tick = tokio::time::interval_at(Instant::now() + POLL, POLL);
         let mut retry_at: Option<Instant> = None;
+        let (play_tx, mut plays) = mpsc::channel(32);
+        let mut names: HashMap<String, String> = HashMap::new();
+        let mut watch = PlayWatch::default();
+        let mut presence: Option<Task> = None;
+        let mut friends_tick = tokio::time::interval(FRIENDS_POLL);
 
         loop {
             let refresh_at = retry_at.unwrap_or(match client.session().await {
@@ -246,6 +266,30 @@ impl Worker {
                     },
                     _ => Ok(()),
                 },
+                Some((event, payload)) = plays.recv() => {
+                    if event == "presence" {
+                        self.on_presence(&payload, &names, &mut watch);
+                    }
+                    Ok(())
+                }
+                _ = friends_tick.tick() => {
+                    let rows = client.select::<Value>("friendships", &friends_query(&uid)).await;
+                    let synced = self.sync(&client, &mut saved, &tokens).await;
+                    // A failed read keeps the current friends; the next tick tries again.
+                    if let (Ok(()), Ok(rows)) = (&synced, rows) {
+                        let next = friends(&rows, &uid);
+                        if presence.is_none() || next.len() != names.len() || next.keys().any(|id| !names.contains_key(id)) {
+                            presence = None;
+                            if !next.is_empty() {
+                                let topics: Vec<String> = next.keys().map(|id| format!("{PLAYING_TOPIC}{id}")).collect();
+                                let (url, anon_key, rx, tx) = (url.clone(), anon_key.clone(), presence_tokens.clone(), play_tx.clone());
+                                presence = Some(Task(tokio::spawn(async move { realtime::listen_presence(&url, &anon_key, &topics, rx, tx).await })));
+                            }
+                        }
+                        names = next;
+                    }
+                    synced
+                }
                 _ = tokio::time::sleep_until(refresh_at) => self.refresh(&client, &mut saved, &tokens).await,
                 _ = cmd_tick.tick() => match self.cmds.try_recv() {
                     Ok(Cmd::Reply { room, text, peer_public }) => self.reply(&client, &mut saved, &tokens, &keys, room, text, &peer_public).await,
@@ -273,6 +317,19 @@ impl Worker {
                 Err(Fail::Gone) => return true,
                 Err(Fail::Retry) => retry_at = Some(Instant::now() + REFRESH_RETRY),
             }
+        }
+    }
+
+    /// A friend's presence changed: pop up if they just started a game.
+    fn on_presence(&self, payload: &Value, names: &HashMap<String, String>, watch: &mut PlayWatch) {
+        let Some(id) = payload["topic"].as_str().and_then(|t| t.strip_prefix(PLAYING_TOPIC)) else { return };
+        // Events from a listener just replaced can name someone no longer a friend.
+        let Some(name) = names.get(id) else { return };
+        let title = playing_title(payload["entries"].as_array().map_or(&[], Vec::as_slice));
+        if watch.update(id, title.clone())
+            && let Some(title) = title
+        {
+            self.push(Out::Playing { friend: name.clone(), title });
         }
     }
 
