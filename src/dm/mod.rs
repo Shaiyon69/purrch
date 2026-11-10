@@ -3,7 +3,9 @@
 pub mod worker;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use shaiyon_crypto::{Envelope, Jwk};
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -107,10 +109,110 @@ pub fn decrypt(content: &str, own: Option<&Jwk>, legacy: &[Jwk], sender_public: 
     shaiyon_crypto::decrypt_text_any(keys.iter(), &env)
 }
 
+// ---- friends playing in Chimaera ----
+
+/// Chimaera tracks "now playing" on `chimaera-presence-<userId>` (its presence-core.ts),
+/// payload `{ playing: { title, objectId, shop, iconUrl } | null, since }`.
+pub const PLAYING_TOPIC: &str = "chimaera-presence-";
+const TITLE_CHARS: usize = 80;
+
+/// Accepted friendships of `me`, both sides with id and username (Messapp's fetchAcceptedFriends).
+pub fn friends_query(me: &str) -> String {
+    format!(
+        "select=sender_id,receiver_id,sender:profiles!fk_sender(id,username),receiver:profiles!fk_receiver(id,username)&or=(sender_id.eq.{me},receiver_id.eq.{me})&status=eq.accepted"
+    )
+}
+
+/// Friendship rows to friend id and username: always the side that is not `me`.
+pub fn friends(rows: &[Value], me: &str) -> HashMap<String, String> {
+    rows.iter()
+        .filter_map(|row| {
+            let p = if row["sender_id"] == me { &row["receiver"] } else { &row["sender"] };
+            Some((p["id"].as_str()?.to_string(), p["username"].as_str().unwrap_or_default().to_string()))
+        })
+        .collect()
+}
+
+/// The game in a friend's presence entries, or None. Any signed-in client can track on that
+/// public channel, so the title is checked and cleaned like Messapp's chimaeraPresence.js.
+pub fn playing_title(entries: &[Value]) -> Option<String> {
+    let since = |v: &Value| v["since"].as_f64().unwrap_or(0.0);
+    // One user can have several Chimaera windows open; the newest entry wins.
+    let latest = entries.iter().reduce(|a, b| if since(b) > since(a) { b } else { a })?;
+    let playing = &latest["playing"];
+    playing["objectId"].as_str()?;
+    let title: String = playing["title"].as_str()?.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let title: String = title.trim().chars().take(TITLE_CHARS).collect();
+    (!title.is_empty()).then_some(title)
+}
+
+/// What each friend last played, to pop up only when a game starts.
+#[derive(Default)]
+pub struct PlayWatch(HashMap<String, Option<String>>);
+
+impl PlayWatch {
+    /// True only when `friend` went from no game to one. The first sight of a friend only sets
+    /// the baseline, so friends already playing when Purrch starts do not pop up.
+    pub fn update(&mut self, friend: &str, title: Option<String>) -> bool {
+        let started = title.is_some() && matches!(self.0.get(friend), Some(None));
+        self.0.insert(friend.into(), title);
+        started
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn friends_query_matches_messapp() {
+        assert_eq!(
+            friends_query("u1"),
+            "select=sender_id,receiver_id,sender:profiles!fk_sender(id,username),receiver:profiles!fk_receiver(id,username)&or=(sender_id.eq.u1,receiver_id.eq.u1)&status=eq.accepted"
+        );
+    }
+
+    #[test]
+    fn friends_are_the_other_side() {
+        let rows = [
+            json!({"sender_id": "me", "receiver_id": "b", "sender": {"id": "me", "username": "me"}, "receiver": {"id": "b", "username": "bob"}}),
+            json!({"sender_id": "c", "receiver_id": "me", "sender": {"id": "c", "username": "cat"}, "receiver": {"id": "me", "username": "me"}}),
+            json!({"sender_id": "d", "receiver_id": "me", "sender": null, "receiver": {"id": "me"}}),
+        ];
+        let f = friends(&rows, "me");
+        assert_eq!(f.len(), 2);
+        assert_eq!(f["b"], "bob");
+        assert_eq!(f["c"], "cat");
+    }
+
+    #[test]
+    fn playing_title_checks_entries() {
+        let game = |title: Value, since: u64| json!({"playing": {"title": title, "objectId": "620"}, "since": since});
+        assert_eq!(playing_title(&[]), None);
+        assert_eq!(playing_title(&[json!({"playing": null, "since": 1})]), None);
+        assert_eq!(playing_title(&[game(json!("Portal 2"), 2), json!({"playing": null, "since": 1})]).as_deref(), Some("Portal 2"));
+        assert_eq!(playing_title(&[json!({"playing": null, "since": 3}), game(json!("Portal 2"), 2)]), None);
+        for junk in [json!({"playing": {"title": 5, "objectId": "1"}}), json!({"playing": {"title": "x"}}), json!({"playing": "Portal"}), json!(null)] {
+            assert_eq!(playing_title(std::slice::from_ref(&junk)), None, "{junk}");
+        }
+        assert_eq!(playing_title(&[game(json!("   "), 1)]), None);
+        let long = playing_title(&[game(json!(format!("  A\nB{}", "é".repeat(200))), 1)]).unwrap();
+        assert!(long.starts_with("A B"));
+        assert_eq!(long.chars().count(), 80);
+    }
+
+    #[test]
+    fn play_watch_pops_only_when_a_game_starts() {
+        let mut w = PlayWatch::default();
+        assert!(!w.update("b", Some("Portal".into())), "already playing at start: baseline only");
+        assert!(!w.update("c", None));
+        assert!(w.update("c", Some("Portal".into())));
+        assert!(!w.update("c", Some("Portal".into())));
+        assert!(!w.update("c", Some("Hades".into())), "switching games without stopping");
+        assert!(!w.update("c", None));
+        assert!(w.update("c", Some("Hades".into())));
+    }
 
     #[test]
     fn preview_cuts_multibyte_on_char_boundary() {
